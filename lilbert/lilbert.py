@@ -34,7 +34,7 @@ def reduce_embedding_dim(x:torch.nn.Embedding, dim:int):
     return x
 
 
-def make_lil_bert(bert:pt.BertModel, dim:int=420):
+def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=False):
     assert(float(int(420/bert.config.num_attention_heads)) == 420./bert.config.num_attention_heads)
     lil_bert = bert
     # lil embeddings
@@ -71,6 +71,11 @@ def make_lil_bert(bert:pt.BertModel, dim:int=420):
 
         # print(lil_layer)
     # print(lil_bert)
+    def reset_params(x):
+        if hasattr(x, "reset_parameters"):
+            x.reset_parameters()
+    if vanilla:
+        lil_bert.apply(reset_params)
     return lil_bert
 
 
@@ -226,7 +231,7 @@ class BertDistillWithAttentionModel(BertDistillModel):
 def try_bert_distill_model():
     teacher, tok = get_bert()
     student, _ = get_bert()
-    student = make_lil_bert(student, dim=420)
+    student = make_lil_bert(student, dim=420, vanilla=True)
     teacher = BertClassifier(teacher, 768, 5)
     student = BertClassifier(student, 420, 5)
     m = BertDistillModel(teacher, student, alpha=.5)
@@ -243,7 +248,7 @@ def try_bert_distill_model():
 def try_bert_distill_model_with_attention():
     teacher, tok = get_bert()
     student, _ = get_bert()
-    student = make_lil_bert(student, dim=420)
+    student = make_lil_bert(student, dim=420, vanilla=True)
     teacher = BertClassifier(teacher, 768, 5)
     student = BertClassifier(student, 420, 5)
     m = BertDistillWithAttentionModel(teacher, student, alpha=.5, beta=1.)
