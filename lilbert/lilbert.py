@@ -1,5 +1,6 @@
 import sys
 
+sys.path.append('../transformer')
 import pytorch_transformers as pt       # needs lukovnikov/master fork
 import torch
 
