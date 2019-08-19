@@ -1,7 +1,9 @@
+import copy
 import sys
 
 import pytorch_transformers as pt       # needs lukovnikov/master fork
 import torch
+import numpy as np
 
 
 def param(x:torch.Tensor):
@@ -34,8 +36,9 @@ def reduce_embedding_dim(x:torch.nn.Embedding, dim:int):
     return x
 
 
-def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=False):
+def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=True):
     assert(float(int(420/bert.config.num_attention_heads)) == 420./bert.config.num_attention_heads)
+    bert = copy.deepcopy(bert)
     lil_bert = bert
     # lil embeddings
     lil_embs = bert.embeddings
@@ -123,13 +126,25 @@ class AttentionDistillLoss(torch.nn.Module):
         super(AttentionDistillLoss, self).__init__(**kw)
         self.reduction = reduction
 
-    def forward(self, student_attention_logits, teacher_attention_logits):
+    def forward(self, student_attention_logits, teacher_attention_logits, attention_mask):
         """
         :param teacher_attention_logits:    (batsize, numlayers, numheads, seqlen, seqlen)
         :param student_attention_logits:    (batsize, numlayers, numheads, seqlen, seqlen)
+        :param attention_mask:              (batsize, seqlen)
         :return:
         """
-        distance = (teacher_attention_logits - student_attention_logits).norm(2, -1)
+        att_mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)
+        att_mask = att_mask.unsqueeze(1).unsqueeze(2)
+        distances = (teacher_attention_logits - student_attention_logits)
+        distances = distances * att_mask.float()
+        distance = distances.norm(2, -1) #(distances ** 2).sum(-1))     # (batsize, numl, numh, seqlen)
+        # average over sequence elements in example
+        att_mask = att_mask.sum(-1) > 0
+        distance = distance.sum(-1) / att_mask.float().sum(-1)
+        # average over heads and layers
+        distance = distance.mean(-1).mean(-1)
+        # distance = distances.norm(2, -1)
+        # average over examples
         distance = distance.mean() if self.reduction == "mean" else distance.sum()
         return distance
 
@@ -154,6 +169,8 @@ class BertClassifier(torch.nn.Module):      # almost straight from pytorch-trans
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None,
                 position_ids=None, head_mask=None):
+        if attention_mask is None:
+            attention_mask = input_ids != 0
         outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
                             attention_mask=attention_mask, head_mask=head_mask)
         pooled_output = outputs[1]
@@ -199,6 +216,8 @@ class BertDistillModel(torch.nn.Module):
         Same as BertModel
         :param targets: (batsize,) classification target int ids
         """
+        if attention_mask is None:
+            attention_mask = input_ids != 0
         # feed through teacher, get attention logits and output logits
         with torch.no_grad():
             teacher_logits, teacher_attention_logits = self.teacher(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, position_ids=position_ids)
@@ -208,10 +227,10 @@ class BertDistillModel(torch.nn.Module):
         student_logits, student_attention_logits = self.student(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, position_ids=position_ids)
         student_attention_logits = torch.stack(student_attention_logits, 1)
         # compute loss
-        loss = self.get_loss(targets, student_logits, teacher_logits, student_attention_logits, teacher_attention_logits)
+        loss = self.get_loss(targets, student_logits, teacher_logits, student_attention_logits, teacher_attention_logits, attention_mask)
         return loss, student_logits
 
-    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits):
+    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask):
         return self.loss(pred, g, teacher_pred)
 
 
@@ -221,9 +240,9 @@ class BertDistillWithAttentionModel(BertDistillModel):
         self.beta = beta
         self.att_loss = AttentionDistillLoss()
 
-    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits):
-        mainl = super(BertDistillWithAttentionModel, self).get_loss(g, pred, teacher_pred, sa_logits, ta_logits)
-        attl = self.att_loss(sa_logits, ta_logits)
+    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask):
+        mainl = super(BertDistillWithAttentionModel, self).get_loss(g, pred, teacher_pred, sa_logits, ta_logits, att_mask)
+        attl = self.att_loss(sa_logits, ta_logits, att_mask)
         ret = mainl + self.beta * attl
         return ret
 
@@ -246,24 +265,44 @@ def try_bert_distill_model():
 
 
 def try_bert_distill_model_with_attention():
-    teacher, tok = get_bert()
-    student, _ = get_bert()
-    student = make_lil_bert(student, dim=420, vanilla=True)
-    teacher = BertClassifier(teacher, 768, 5)
-    student = BertClassifier(student, 420, 5)
+    teacher_, tok = get_bert()
+    student_ = make_lil_bert(teacher_, dim=420, vanilla=False)
+    teacher = BertClassifier(teacher_, 768, 5)
+    student = BertClassifier(student_, 420, 5)
     m = BertDistillWithAttentionModel(teacher, student, alpha=.5, beta=1.)
 
-    x = "lil bert went for a walk"
-    xtok = torch.tensor(tok.encode(x)).unsqueeze(0)
-    y = m(xtok, targets=torch.randint(0, 4, (1,)))
+    xs = ["lil bert went for a walk", "he found ernie [PAD] [PAD] [PAD]"]
+    xtoks = [torch.tensor(tok.encode(x)).unsqueeze(0) for x in xs]
+    y = m(torch.cat(xtoks, 0), targets=torch.randint(0, 4, (2,)))
+
+    teacher_wordembs = teacher_.embeddings.word_embeddings.weight.detach().numpy().copy()+0
+    student_wordembs = student_.embeddings.word_embeddings.weight.detach().numpy().copy() + 0
+    print(teacher_wordembs[1037, :5])
+    print(student_wordembs[1037, :5])
 
     l = y[0]
     l.backward()
+    optim = torch.optim.SGD(m.parameters(), lr=1)
+    # optim.zero_grad()
     print(student.bert.embeddings.word_embeddings.weight.grad[:, 0].nonzero())
+    print(teacher_.embeddings.word_embeddings.weight.grad)
+    assert(teacher_.embeddings.word_embeddings.weight.grad is None)
+    assert(student_.embeddings.word_embeddings.weight.grad is not None)
+    optim.step()
+
+    teacher_wordembs_after = teacher_.embeddings.word_embeddings.weight.detach().numpy().copy()+0
+    student_wordembs_after = student_.embeddings.word_embeddings.weight.detach().numpy().copy() + 0
+    print(teacher_wordembs_after[1037,:5])
+    print(student_wordembs_after[1037,:5])
+    assert(np.allclose(teacher_wordembs, teacher_wordembs_after))
+    assert(not np.allclose(student_wordembs, student_wordembs_after))
+    print("DONE.")
+
 
 
 if __name__ == '__main__':
     try_bert_distill_model_with_attention()
+    sys.exit()
     try_bert_distill_model()
     try_classification_distill_loss()
     try_attention_distill_loss()
