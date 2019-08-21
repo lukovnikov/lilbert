@@ -137,7 +137,7 @@ class AttentionDistillLoss(torch.nn.Module):
         att_mask = att_mask.unsqueeze(1).unsqueeze(2)
         distances = (teacher_attention_logits - student_attention_logits)
         distances = distances * att_mask.float()
-        distance = distances.norm(2, -1) #(distances ** 2).sum(-1))     # (batsize, numl, numh, seqlen)
+        distance = distances.norm(2, -1) ** 2 #(distances ** 2).sum(-1))     # (batsize, numl, numh, seqlen)
         # average over sequence elements in example
         att_mask = att_mask.sum(-1) > 0
         distance = distance.sum(-1) / att_mask.float().sum(-1)
