@@ -17,26 +17,45 @@ def get_bert(x:str="bert-base-uncased"):
 
 
 def reduce_linear_dim(x:torch.nn.Linear, indim:int, outdim:int):
-    x.weight = param(x.weight[:outdim, :indim])
-    x.bias = param(x.bias[:outdim])
+    x.weight = param(x.weight.detach()[:outdim, :indim])
+    x.bias = param(x.bias.detach()[:outdim])
+    x.in_features = indim
+    x.out_features = outdim
+    return x
+
+
+def reduce_projection_dim(x:torch.nn.Linear, indim:int, outdim:int, numheads:int):
+    """ x is a projection layer """
+    # do weight
+    w = x.weight.detach()
+    ws = torch.chunk(w, numheads, 0)
+    ws = [we[:outdim//numheads, :indim] for we in ws]
+    w = torch.cat(ws, 0)
+    x.weight = param(w)
+    # do bias
+    b = x.bias.view(numheads, int(x.bias.size(0)/numheads))
+    b = b.detach()[:, :int(outdim/numheads)]
+    b = b.contiguous().view(outdim)
+    x.bias = param(b)
+    # dims
     x.in_features = indim
     x.out_features = outdim
     return x
 
 
 def reduce_layernorm_dim(x, dim:int):
-    x.weight = param(x.weight[:dim])
-    x.bias = param(x.bias[:dim])
+    x.weight = param(x.weight.detach()[:dim])
+    x.bias = param(x.bias.detach()[:dim])
     return x
 
 
 def reduce_embedding_dim(x:torch.nn.Embedding, dim:int):
-    x.weight = param(x.weight[:, :dim])
+    x.weight = param(x.weight.detach()[:, :dim])
     x.embedding_dim = dim
     return x
 
 
-def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=True):
+def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=True, vanilla_emb=False):
     assert(float(int(420/bert.config.num_attention_heads)) == 420./bert.config.num_attention_heads)
     bert = copy.deepcopy(bert)
     lil_bert = bert
@@ -54,9 +73,9 @@ def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=True):
     for lil_layer in lil_bert.encoder.layer:
         # print(lil_layer)
         lil_attention = lil_layer.attention.self
-        reduce_linear_dim(lil_attention.key, indim=dim, outdim=dim)
-        reduce_linear_dim(lil_attention.query, indim=dim, outdim=dim)
-        reduce_linear_dim(lil_attention.value, indim=dim, outdim=dim)
+        reduce_projection_dim(lil_attention.key, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
+        reduce_projection_dim(lil_attention.query, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
+        reduce_projection_dim(lil_attention.value, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
         lil_attention.attention_head_size = int(dim / bert.config.num_attention_heads)
         lil_attention.all_head_size = lil_attention.num_attention_heads * lil_attention.attention_head_size
 
@@ -78,7 +97,10 @@ def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=True):
         if hasattr(x, "reset_parameters"):
             x.reset_parameters()
     if vanilla:
-        lil_bert.apply(reset_params)
+        lil_pooler.apply(reset_params)
+        lil_bert.encoder.apply(reset_params)
+    if vanilla_emb:
+        lil_embs.apply(reset_params)
     return lil_bert
 
 
@@ -299,8 +321,37 @@ def try_bert_distill_model_with_attention():
     print("DONE.")
 
 
+def try_reduce_projection_dim():
+    layer = torch.nn.Linear(768, 768)
+    x = torch.ones(1,768)
+    y = layer(x)
+    reduce_projection_dim(layer,768,420,12)
+    xr = x[:, :420]
+    yr = layer(x)
+    print(yr[:, 420//12:420//12+768//12] - y[:, 768//12:768//6])
+
+
+def try_reduce_project_dim_selfattnlayer():
+    bert, tok = get_bert()
+    l = bert.encoder.layer[0].attention.self
+    lil_l = copy.deepcopy(l)
+    reduce_projection_dim(lil_l.query, 768, 420, 12)
+    reduce_projection_dim(lil_l.key, 768, 420, 12)
+    reduce_projection_dim(lil_l.value, 768, 420, 12)
+    lil_l.attention_head_size = 420//12
+    lil_l.all_head_size = 420
+    x = torch.randn(1,2,768)
+    am = torch.ones(1, 1, 2, 2)
+    y = l(x, am)[0]
+    yr = lil_l(x, am)[0]
+    print(yr[:, :, 420 // 12:420 // 12 + 768 // 12] - y[:, :, 768 // 12:768 // 6])
+
 
 if __name__ == '__main__':
+    # try_reduce_projection_dim()
+    # sys.exit()
+    try_reduce_project_dim_selfattnlayer()
+    sys.exit()
     try_bert_distill_model_with_attention()
     sys.exit()
     try_bert_distill_model()
