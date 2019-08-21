@@ -43,6 +43,20 @@ def reduce_projection_dim(x:torch.nn.Linear, indim:int, outdim:int, numheads:int
     return x
 
 
+def reduce_linear_dim_headstriped_input(x:torch.nn.Linear, indim:int, outdim:int, numheads:int):
+    # do weight
+    w = x.weight.detach()
+    ws = torch.chunk(w, numheads, 1)    # chunk by input
+    ws = [we[:outdim, :indim//numheads] for we in ws]
+    w = torch.cat(ws, 1)
+    x.weight = param(w)
+    # normal reduction:
+    x.bias = param(x.bias.detach()[:outdim])
+    x.in_features = indim
+    x.out_features = outdim
+    return x
+
+
 def reduce_layernorm_dim(x, dim:int):
     x.weight = param(x.weight.detach()[:dim])
     x.bias = param(x.bias.detach()[:dim])
@@ -80,7 +94,7 @@ def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=True, vanilla_emb=Fals
         lil_attention.all_head_size = lil_attention.num_attention_heads * lil_attention.attention_head_size
 
         lil_attention_output = lil_layer.attention.output
-        reduce_linear_dim(lil_attention_output.dense, indim=dim, outdim=dim)
+        reduce_linear_dim_headstriped_input(lil_attention_output.dense, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
         reduce_layernorm_dim(lil_attention_output.LayerNorm, dim=dim)
 
         lil_interm = lil_layer.intermediate
@@ -350,8 +364,8 @@ def try_reduce_project_dim_selfattnlayer():
 if __name__ == '__main__':
     # try_reduce_projection_dim()
     # sys.exit()
-    try_reduce_project_dim_selfattnlayer()
-    sys.exit()
+    # try_reduce_project_dim_selfattnlayer()
+    # sys.exit()
     try_bert_distill_model_with_attention()
     sys.exit()
     try_bert_distill_model()
