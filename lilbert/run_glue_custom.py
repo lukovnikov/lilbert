@@ -110,6 +110,7 @@ def train(args, train_dataset, model, tokenizer, mode):
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
+    previous_accuracy = 0
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
@@ -171,11 +172,19 @@ def train(args, train_dataset, model, tokenizer, mode):
                     # Log metrics
                     if args.local_rank == -1 and args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
                         results = evaluate(args, model, tokenizer, mode)
+                        if previous_accuracy < results['acc']:
+                            previous_accuracy = results['acc']
+                            #save the model here
+                            if mode == 'custom_lilbert':
+                                torch.save(model,args.output_dir+args.model_name)
+
                         for key, value in results.items():
                             tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
                     tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
                     tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
+                    logging.info(f"the current training loss is {tr_loss - logging_loss}")
                     logging_loss = tr_loss
+
 
                 if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
                     # Save model checkpoint
@@ -283,6 +292,8 @@ def evaluate(args, model, tokenizer, mode, prefix=""):
         result = compute_metrics(eval_task, preds, out_label_ids)
         results.update(result)
 
+
+
         output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
         with open(output_eval_file, "w") as writer:
             logger.info("***** Eval results {} *****".format(prefix))
@@ -348,6 +359,7 @@ class Arguments():
     model_name_or_path = 'bert-base-uncased'
     task_name = 'MNLI'
     output_dir = 'output/bert/'
+    output_name = 'model.pt'
     config_name = model_name
     tokenizer_name = 'BertTokenizer'
     cache_dir = ''
@@ -504,31 +516,24 @@ def main(model, tokenizer, mode):
 
 if __name__ == '__main__':
 
-    mode = 'not_lilbert'
+    mode = 'lilbert'
     args = Arguments()
     numclasses = 3
 
     if mode != 'lilbert':
-        model_class, tokenizer_class, pretrained_weights = BertModel, BertTokenizer, 'bert-base-uncased'
-        tokenizer = tokenizer_class.from_pretrained(pretrained_weights)
-        bert = model_class.from_pretrained(pretrained_weights)
-
-        # Test if it works
-        input_ids = torch.tensor([tokenizer.encode("Here is some text to encode")])
-        with torch.no_grad():
-            last_hidden_states = bert(input_ids)[0]  # Models outputs are now tuples
-            print(last_hidden_states)
-
+        teacher, tok = lilbert.get_bert()
         # Init custom Bert Classifier model.
         dim = 768
-        model = lilbert.BertClassifier(bert, dim, numclasses, 0.1)
-        main(model,tokenizer,mode)
+        model = lilbert.BertClassifier(teacher, 768, numclasses)
+        main(model,tok,mode)
     else:
         # for now lilbert without any attention distillation
-        teacher, tok = lilbert.get_bert()
-        student, _ = lilbert.get_bert()
+        _, tok = lilbert.get_bert()
+        teacher = torch.load(args.output_dir+args.model_name)
+        student, _ = lilbert.get_bert(teacher.bert)
         student = lilbert.make_lil_bert(student, dim=420, vanilla=True)
-        teacher = lilbert.BertClassifier(teacher, 768, numclasses)
+        # teacher = lilbert.BertClassifier(teacher, 768, numclasses)
         student = lilbert.BertClassifier(student, 420, numclasses)
-        m = lilbert.BertDistillModel(teacher, student, alpha=.5)
+        # m = lilbert.BertDistillModel(teacher, student, alpha=2)
+        m = lilbert.BertDistillWithAttentionModel(teacher, student, alpha=0.5)
         main(m, tok, mode)
