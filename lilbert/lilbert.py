@@ -1,5 +1,6 @@
 import copy
 import sys
+from typing import Union
 
 import pytorch_transformers as pt       # needs lukovnikov/master fork
 import torch
@@ -67,55 +68,6 @@ def reduce_embedding_dim(x:torch.nn.Embedding, dim:int):
     x.weight = param(x.weight.detach()[:, :dim])
     x.embedding_dim = dim
     return x
-
-
-def make_lil_bert(bert:pt.BertModel, dim:int=420, vanilla=True, vanilla_emb=False):
-    assert(float(int(420/bert.config.num_attention_heads)) == 420./bert.config.num_attention_heads)
-    bert = copy.deepcopy(bert)
-    lil_bert = bert
-    # lil embeddings
-    lil_embs = bert.embeddings
-    # print(lil_embs)
-    reduce_embedding_dim(lil_embs.position_embeddings, dim)
-    reduce_embedding_dim(lil_embs.token_type_embeddings, dim)
-    reduce_embedding_dim(lil_embs.word_embeddings, dim)
-    reduce_layernorm_dim(lil_embs.LayerNorm, dim)
-    # lil pooler
-    lil_pooler = bert.pooler.dense
-    reduce_linear_dim(lil_pooler, indim=dim, outdim=dim)
-    # lil encoder
-    for lil_layer in lil_bert.encoder.layer:
-        # print(lil_layer)
-        lil_attention = lil_layer.attention.self
-        reduce_projection_dim(lil_attention.key, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
-        reduce_projection_dim(lil_attention.query, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
-        reduce_projection_dim(lil_attention.value, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
-        lil_attention.attention_head_size = int(dim / bert.config.num_attention_heads)
-        lil_attention.all_head_size = lil_attention.num_attention_heads * lil_attention.attention_head_size
-
-        lil_attention_output = lil_layer.attention.output
-        reduce_linear_dim_headstriped_input(lil_attention_output.dense, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
-        reduce_layernorm_dim(lil_attention_output.LayerNorm, dim=dim)
-
-        lil_interm = lil_layer.intermediate
-        lil_inter_dim = int((lil_interm.dense.weight.size(0) / lil_interm.dense.weight.size(1)) * dim)
-        reduce_linear_dim(lil_interm.dense, indim=dim, outdim=lil_inter_dim)
-
-        lil_output = lil_layer.output
-        reduce_linear_dim(lil_output.dense, indim=lil_inter_dim, outdim=dim)
-        reduce_layernorm_dim(lil_output.LayerNorm, dim=dim)
-
-        # print(lil_layer)
-    # print(lil_bert)
-    def reset_params(x):
-        if hasattr(x, "reset_parameters"):
-            x.reset_parameters()
-    if vanilla:
-        lil_pooler.apply(reset_params)
-        lil_bert.encoder.apply(reset_params)
-    if vanilla_emb:
-        lil_embs.apply(reset_params)
-    return lil_bert
 
 
 class ClassificationDistillLoss(torch.nn.Module):
@@ -283,6 +235,129 @@ class BertDistillWithAttentionModel(BertDistillModel):
         return ret
 
 
+def make_lil_bert_prune(bert: pt.BertModel, fraction=0.3):
+    _bert = copy.deepcopy(bert)
+    if isinstance(_bert, BertClassifier):
+        # cut the output layer of classifier too
+        reduce_linear_dim(_bert.classifier, dim, _bert.classifier.out_features)
+        _bert = _bert.bert
+    assert (float(int(420 / _bert.config.num_attention_heads)) == 420. / _bert.config.num_attention_heads)
+    lil_bert = _bert
+    # lil embeddings
+    lil_embs = _bert.embeddings
+    # print(lil_embs)
+    reduce_embedding_dim(lil_embs.position_embeddings, dim)
+    reduce_embedding_dim(lil_embs.token_type_embeddings, dim)
+    reduce_embedding_dim(lil_embs.word_embeddings, dim)
+    reduce_layernorm_dim(lil_embs.LayerNorm, dim)
+    # lil pooler
+    lil_pooler = _bert.pooler.dense
+    reduce_linear_dim(lil_pooler, indim=dim, outdim=dim)
+    # lil encoder
+    for lil_layer in lil_bert.encoder.layer:
+        # print(lil_layer)
+        lil_attention = lil_layer.attention.self
+        reduce_projection_dim(lil_attention.key, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
+        reduce_projection_dim(lil_attention.query, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
+        reduce_projection_dim(lil_attention.value, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
+        lil_attention.attention_head_size = int(dim / _bert.config.num_attention_heads)
+        lil_attention.all_head_size = lil_attention.num_attention_heads * lil_attention.attention_head_size
+
+        lil_attention_output = lil_layer.attention.output
+        reduce_linear_dim_headstriped_input(lil_attention_output.dense, indim=dim, outdim=dim,
+                                            numheads=lil_attention.num_attention_heads)
+        reduce_layernorm_dim(lil_attention_output.LayerNorm, dim=dim)
+
+        lil_interm = lil_layer.intermediate
+        lil_inter_dim = int((lil_interm.dense.weight.size(0) / lil_interm.dense.weight.size(1)) * dim)
+        reduce_linear_dim(lil_interm.dense, indim=dim, outdim=lil_inter_dim)
+
+        lil_output = lil_layer.output
+        reduce_linear_dim(lil_output.dense, indim=lil_inter_dim, outdim=dim)
+        reduce_layernorm_dim(lil_output.LayerNorm, dim=dim)
+
+        # print(lil_layer)
+
+    # print(lil_bert)
+    def reset_params(x):
+        if hasattr(x, "reset_parameters"):
+            x.reset_parameters()
+    return lil_bert
+
+
+def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False, fraction:float=0.3, method="cut"):
+    if method == "cut":
+        print("using method CUT")
+        return make_lil_bert_cut(bert, dim=dim, vanilla=vanilla, vanilla_emb=vanilla_emb)
+    elif method == "prune":
+        print("using pruning by magnitude")
+        return make_lil_bert_prune(_bert=bert, fraction=fraction)
+    else:
+        raise Exception(f"Unknown method {method}")
+
+
+def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False):
+    def reset_params(x):
+        if hasattr(x, "reset_parameters"):
+            x.reset_parameters()
+
+    _bert_ret = copy.deepcopy(bert)
+    if isinstance(_bert_ret, BertClassifier):
+        # cut the output layer of classifier too
+        reduce_linear_dim(_bert_ret.classifier, dim, _bert_ret.classifier.out_features)
+        if vanilla:
+            _bert_ret.classifier.apply(reset_params)
+        _bert = _bert_ret.bert
+    else:
+        _bert = _bert_ret
+
+    assert (float(int(420 / _bert.config.num_attention_heads)) == 420. / _bert.config.num_attention_heads)
+    lil_bert = _bert
+    # lil embeddings
+    lil_embs = _bert.embeddings
+    # print(lil_embs)
+    reduce_embedding_dim(lil_embs.position_embeddings, dim)
+    reduce_embedding_dim(lil_embs.token_type_embeddings, dim)
+    reduce_embedding_dim(lil_embs.word_embeddings, dim)
+    reduce_layernorm_dim(lil_embs.LayerNorm, dim)
+    # lil pooler
+    lil_pooler = _bert.pooler.dense
+    reduce_linear_dim(lil_pooler, indim=dim, outdim=dim)
+    # lil encoder
+    for lil_layer in lil_bert.encoder.layer:
+        # print(lil_layer)
+        lil_attention = lil_layer.attention.self
+        reduce_projection_dim(lil_attention.key, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
+        reduce_projection_dim(lil_attention.query, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
+        reduce_projection_dim(lil_attention.value, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
+        lil_attention.attention_head_size = int(dim / _bert.config.num_attention_heads)
+        lil_attention.all_head_size = lil_attention.num_attention_heads * lil_attention.attention_head_size
+
+        lil_attention_output = lil_layer.attention.output
+        reduce_linear_dim_headstriped_input(lil_attention_output.dense, indim=dim, outdim=dim,
+                                            numheads=lil_attention.num_attention_heads)
+        reduce_layernorm_dim(lil_attention_output.LayerNorm, dim=dim)
+
+        lil_interm = lil_layer.intermediate
+        lil_inter_dim = int((lil_interm.dense.weight.size(0) / lil_interm.dense.weight.size(1)) * dim)
+        reduce_linear_dim(lil_interm.dense, indim=dim, outdim=lil_inter_dim)
+
+        lil_output = lil_layer.output
+        reduce_linear_dim(lil_output.dense, indim=lil_inter_dim, outdim=dim)
+        reduce_layernorm_dim(lil_output.LayerNorm, dim=dim)
+
+        # print(lil_layer)
+
+    # print(lil_bert)
+
+    if vanilla:
+        lil_pooler.apply(reset_params)
+        lil_bert.encoder.apply(reset_params)
+    if vanilla_emb:
+        lil_embs.apply(reset_params)
+    return _bert_ret
+
+
 def try_bert_distill_model():
     teacher, tok = get_bert()
     student, _ = get_bert()
@@ -302,9 +377,16 @@ def try_bert_distill_model():
 
 def try_bert_distill_model_with_attention():
     teacher_, tok = get_bert()
-    student_ = make_lil_bert(teacher_, dim=420, vanilla=False)
+    # student_ = make_lil_bert(teacher_, dim=420, vanilla=False)
     teacher = BertClassifier(teacher_, 768, 5)
-    student = BertClassifier(student_, 420, 5)
+    # student = BertClassifier(student_, 420, 5)
+    student = make_lil_bert(teacher, 420)
+    student_ = student.bert
+
+    print(student.bert.embeddings.word_embeddings.weight.size())
+    print(student.bert.encoder.layer[5])
+    print(student.bert.encoder.layer[5].attention.self.query.weight.size())
+
     m = BertDistillWithAttentionModel(teacher, student, alpha=.5, beta=1.)
 
     xs = ["lil bert went for a walk", "he found ernie [PAD] [PAD] [PAD]"]
