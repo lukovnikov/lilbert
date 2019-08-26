@@ -376,13 +376,18 @@ def prune_embedding_submodules(fraction:float, m:torch.nn.Module):
         setattr(m, k, v)
 
 
-def make_lil_bert_prune(bert: pt.BertModel, fraction=0.3):
-    _bert = copy.deepcopy(bert)
+def make_lil_bert_prune(bert: Union[pt.BertModel, BertClassifier], fraction=0.3):
+    _ret_bert = copy.deepcopy(bert)
+    if isinstance(_ret_bert, BertClassifier):
+        _bert = _ret_bert.bert
+    else:
+        _bert = _ret_bert
+
     prune_emb_f = partial(prune_embedding_submodules, fraction)
-    _bert.bert.apply(prune_emb_f)
+    _bert.apply(prune_emb_f)
     prune_linear_f = partial(prune_linear_submodules, fraction)
-    _bert.bert.apply(prune_linear_f)
-    return _bert
+    _bert.apply(prune_linear_f)
+    return _ret_bert
 
 
 def try_prune_lil_bert():
@@ -390,10 +395,8 @@ def try_prune_lil_bert():
     teacher = BertClassifier(teacher, 768, 5)
     student = make_lil_bert(teacher, fraction=0.1, method="prune")
     m = BertDistillModel(teacher, student, alpha=.5)
-    # print(student)
+    print(student)
     print(student.bert.encoder.layer[5].attention.self.query.weight)
-
-
 
 
 def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False, fraction:float=0.3, method="cut"):
