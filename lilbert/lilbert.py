@@ -285,9 +285,9 @@ class PrunedLinear(torch.nn.Module):
 
     def prune_magnitude(self, frac):
         vals, ids = torch.sort(self.weight.view(-1).abs(), descending=True)
-        numretained = int(frac * len(vals))
+        numretained = int(frac * len(vals)) - 1
         cutoff_value = vals[numretained]
-        self.W_mask = self.weight.abs() > cutoff_value
+        self.W_mask = self.weight.abs() >= cutoff_value
         self.weight = torch.nn.Parameter((self.weight * self.W_mask.float()).detach())
         if self._debug:
             numleft = self.W_mask.sum().float().detach().cpu().item()
@@ -318,9 +318,9 @@ class PrunedEmbedding(torch.nn.Embedding):
 
     def prune_magnitude(self, frac):
         vals, ids = torch.sort(self.weight.abs(), descending=True, dim=1)
-        numretained = int(frac * vals.size(1))
+        numretained = int(frac * vals.size(1)) - 1
         cutoff_values = vals[:, numretained]
-        self.W_mask = self.weight.abs() > (cutoff_values.unsqueeze(1))
+        self.W_mask = self.weight.abs() >= (cutoff_values.unsqueeze(1))
         self.weight = torch.nn.Parameter((self.weight * self.W_mask.float()).detach())
         if self._debug:
             numleft = self.W_mask.sum().float().detach().cpu().item()
@@ -376,14 +376,14 @@ def prune_embedding_submodules(fraction:float, m:torch.nn.Module):
         setattr(m, k, v)
 
 
-def make_lil_bert_prune(bert: Union[pt.BertModel, BertClassifier], fraction=0.3):
+def make_lil_bert_prune(bert: Union[pt.BertModel, BertClassifier], fraction=0.3, fraction_emb=0.5):
     _ret_bert = copy.deepcopy(bert)
     if isinstance(_ret_bert, BertClassifier):
         _bert = _ret_bert.bert
     else:
         _bert = _ret_bert
 
-    prune_emb_f = partial(prune_embedding_submodules, fraction)
+    prune_emb_f = partial(prune_embedding_submodules, fraction_emb)
     _bert.apply(prune_emb_f)
     prune_linear_f = partial(prune_linear_submodules, fraction)
     _bert.apply(prune_linear_f)
@@ -393,19 +393,19 @@ def make_lil_bert_prune(bert: Union[pt.BertModel, BertClassifier], fraction=0.3)
 def try_prune_lil_bert():
     teacher, tok = get_bert()
     teacher = BertClassifier(teacher, 768, 5)
-    student = make_lil_bert(teacher, fraction=0.1, method="prune")
+    student = make_lil_bert(teacher, fraction=0.1, fraction_emb=1., method="prune")
     m = BertDistillModel(teacher, student, alpha=.5)
     print(student)
     print(student.bert.encoder.layer[5].attention.self.query.weight)
 
 
-def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False, fraction:float=0.3, method="cut"):
+def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False, fraction:float=0.3, fraction_emb=0.5, method="cut"):
     if method == "cut":
         print("using method CUT")
         return make_lil_bert_cut(bert, dim=dim, vanilla=vanilla, vanilla_emb=vanilla_emb)
     elif method == "prune":
         print("using pruning by magnitude")
-        return make_lil_bert_prune(bert=bert, fraction=fraction)
+        return make_lil_bert_prune(bert=bert, fraction=fraction, fraction_emb=fraction_emb)
     else:
         raise Exception(f"Unknown method {method}")
 
