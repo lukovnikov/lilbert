@@ -1,10 +1,15 @@
 import copy
+import math
 import sys
+from functools import partial
 from typing import Union
 
 import pytorch_transformers as pt       # needs lukovnikov/master fork
 import torch
 import numpy as np
+
+
+DEBUG = True
 
 
 def param(x:torch.Tensor):
@@ -235,54 +240,160 @@ class BertDistillWithAttentionModel(BertDistillModel):
         return ret
 
 
+class PrunedLinear(torch.nn.Module):
+    r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
+
+    Args:
+        in_features: size of each input sample
+        out_features: size of each output sample
+        bias: If set to ``False``, the layer will not learn an additive bias.
+            Default: ``True``
+
+    Shape:
+        - Input: :math:`(N, *, H_{in})` where :math:`*` means any number of
+          additional dimensions and :math:`H_{in} = \text{in\_features}`
+        - Output: :math:`(N, *, H_{out})` where all but the last dimension
+          are the same shape as the input and :math:`H_{out} = \text{out\_features}`.
+
+    Attributes:
+        weight: the learnable weights of the module of shape
+            :math:`(\text{out\_features}, \text{in\_features})`. The values are
+            initialized from :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})`, where
+            :math:`k = \frac{1}{\text{in\_features}}`
+        bias:   the learnable bias of the module of shape :math:`(\text{out\_features})`.
+                If :attr:`bias` is ``True``, the values are initialized from
+                :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})` where
+                :math:`k = \frac{1}{\text{in\_features}}`
+
+    Examples::
+
+        >>> m = nn.Linear(20, 30)
+        >>> input = torch.randn(128, 20)
+        >>> output = m(input)
+        >>> print(output.size())
+        torch.Size([128, 30])
+    """
+    __constants__ = ['bias', 'in_features', 'out_features']
+
+    def __init__(self, linear:torch.nn.Linear):
+        super(PrunedLinear, self).__init__()
+        self.in_features = linear.in_features
+        self.out_features = linear.out_features
+        self.weight, self.bias = linear.weight, linear.bias
+        self.W_mask = None
+        self._debug = DEBUG
+
+    def prune_magnitude(self, frac):
+        vals, ids = torch.sort(self.weight.view(-1).abs(), descending=True)
+        numretained = int(frac * len(vals))
+        cutoff_value = vals[numretained]
+        self.W_mask = self.weight.abs() > cutoff_value
+        self.weight = torch.nn.Parameter((self.weight * self.W_mask.float()).detach())
+        if self._debug:
+            numleft = self.W_mask.sum().float().detach().cpu().item()
+            print(f"Number of elements left: {numleft/(self.weight.size(0)*self.weight.size(1))}% {numleft} ({numretained}) with cutoff {cutoff_value} for frac={frac}")
+
+    def forward(self, input):
+        weight = self.weight * self.W_mask.float() if self.W_mask is not None else self.weight
+        ret = torch.nn.functional.linear(input, weight, self.bias)
+        return ret
+
+    def extra_repr(self):
+        return 'in_features={}, out_features={}, bias={}'.format(
+            self.in_features, self.out_features, self.bias is not None
+        )
+
+
+class PrunedEmbedding(torch.nn.Embedding):
+    def __init__(self, emb:torch.nn.Embedding):
+        super(PrunedEmbedding, self).__init__(emb.num_embeddings, emb.embedding_dim)
+        self.padding_idx = emb.padding_idx
+        self.max_norm = emb.max_norm
+        self.norm_type = emb.norm_type
+        self.scale_grad_by_freq = emb.scale_grad_by_freq
+        self.weight = torch.nn.Parameter(emb.weight.detach())
+        self.sparse = emb.sparse
+        self.W_mask = None
+        self._debug = DEBUG
+
+    def prune_magnitude(self, frac):
+        vals, ids = torch.sort(self.weight.abs(), descending=True, dim=1)
+        numretained = int(frac * vals.size(1))
+        cutoff_values = vals[:, numretained]
+        self.W_mask = self.weight.abs() > (cutoff_values.unsqueeze(1))
+        self.weight = torch.nn.Parameter((self.weight * self.W_mask.float()).detach())
+        if self._debug:
+            numleft = self.W_mask.sum().float().detach().cpu().item()
+            print(f"Number of elements left: {numleft/(self.weight.size(0)*self.weight.size(1))}% {numleft} ({numretained}) for frac={frac}")
+
+    def forward(self, input):
+        weight = self.weight * self.W_mask.float() if self.W_mask is not None else self.weight
+        ret = torch.nn.functional.embedding(
+            input, weight, self.padding_idx, self.max_norm,
+            self.norm_type, self.scale_grad_by_freq, self.sparse)
+        return ret
+
+
+def try_prune_emb():
+    l = torch.nn.Embedding(1000, 10)
+    print(l.weight[:10])
+    pl = PrunedEmbedding(l)
+    pl.prune_magnitude(.1)
+    print(pl.weight[:10])
+
+
+def try_prune_linear():
+    l = torch.nn.Linear(10,10)
+    print(l.weight)
+    pl = PrunedLinear(l)
+    pl.prune_magnitude(.5)
+    print(pl.weight)
+    y = pl(torch.rand(2, 10))
+    loss = y.sum()
+    loss.backward()
+    print(pl.weight.grad)
+
+
+def prune_linear_submodules(fraction:float, m:torch.nn.Module):
+    repl_dict = {}
+    for subname, submodule in m.named_children():
+        if isinstance(submodule, torch.nn.Linear):
+            replacement = PrunedLinear(submodule)
+            replacement.prune_magnitude(fraction)
+            repl_dict[subname] = replacement
+    for k, v in repl_dict.items():
+        setattr(m, k, v)
+
+
+def prune_embedding_submodules(fraction:float, m:torch.nn.Module):
+    repl_dict = {}
+    for subname, submodule in m.named_children():
+        if isinstance(submodule, torch.nn.Embedding):
+            replacement = PrunedEmbedding(submodule)
+            replacement.prune_magnitude(fraction)
+            repl_dict[subname] = replacement
+    for k, v in repl_dict.items():
+        setattr(m, k, v)
+
+
 def make_lil_bert_prune(bert: pt.BertModel, fraction=0.3):
     _bert = copy.deepcopy(bert)
-    if isinstance(_bert, BertClassifier):
-        # cut the output layer of classifier too
-        reduce_linear_dim(_bert.classifier, dim, _bert.classifier.out_features)
-        _bert = _bert.bert
-    assert (float(int(420 / _bert.config.num_attention_heads)) == 420. / _bert.config.num_attention_heads)
-    lil_bert = _bert
-    # lil embeddings
-    lil_embs = _bert.embeddings
-    # print(lil_embs)
-    reduce_embedding_dim(lil_embs.position_embeddings, dim)
-    reduce_embedding_dim(lil_embs.token_type_embeddings, dim)
-    reduce_embedding_dim(lil_embs.word_embeddings, dim)
-    reduce_layernorm_dim(lil_embs.LayerNorm, dim)
-    # lil pooler
-    lil_pooler = _bert.pooler.dense
-    reduce_linear_dim(lil_pooler, indim=dim, outdim=dim)
-    # lil encoder
-    for lil_layer in lil_bert.encoder.layer:
-        # print(lil_layer)
-        lil_attention = lil_layer.attention.self
-        reduce_projection_dim(lil_attention.key, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
-        reduce_projection_dim(lil_attention.query, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
-        reduce_projection_dim(lil_attention.value, indim=dim, outdim=dim, numheads=lil_attention.num_attention_heads)
-        lil_attention.attention_head_size = int(dim / _bert.config.num_attention_heads)
-        lil_attention.all_head_size = lil_attention.num_attention_heads * lil_attention.attention_head_size
+    prune_emb_f = partial(prune_embedding_submodules, fraction)
+    _bert.bert.apply(prune_emb_f)
+    prune_linear_f = partial(prune_linear_submodules, fraction)
+    _bert.bert.apply(prune_linear_f)
+    return _bert
 
-        lil_attention_output = lil_layer.attention.output
-        reduce_linear_dim_headstriped_input(lil_attention_output.dense, indim=dim, outdim=dim,
-                                            numheads=lil_attention.num_attention_heads)
-        reduce_layernorm_dim(lil_attention_output.LayerNorm, dim=dim)
 
-        lil_interm = lil_layer.intermediate
-        lil_inter_dim = int((lil_interm.dense.weight.size(0) / lil_interm.dense.weight.size(1)) * dim)
-        reduce_linear_dim(lil_interm.dense, indim=dim, outdim=lil_inter_dim)
+def try_prune_lil_bert():
+    teacher, tok = get_bert()
+    teacher = BertClassifier(teacher, 768, 5)
+    student = make_lil_bert(teacher, fraction=0.1, method="prune")
+    m = BertDistillModel(teacher, student, alpha=.5)
+    # print(student)
+    print(student.bert.encoder.layer[5].attention.self.query.weight)
 
-        lil_output = lil_layer.output
-        reduce_linear_dim(lil_output.dense, indim=lil_inter_dim, outdim=dim)
-        reduce_layernorm_dim(lil_output.LayerNorm, dim=dim)
 
-        # print(lil_layer)
-
-    # print(lil_bert)
-    def reset_params(x):
-        if hasattr(x, "reset_parameters"):
-            x.reset_parameters()
-    return lil_bert
 
 
 def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False, fraction:float=0.3, method="cut"):
@@ -291,7 +402,7 @@ def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, van
         return make_lil_bert_cut(bert, dim=dim, vanilla=vanilla, vanilla_emb=vanilla_emb)
     elif method == "prune":
         print("using pruning by magnitude")
-        return make_lil_bert_prune(_bert=bert, fraction=fraction)
+        return make_lil_bert_prune(bert=bert, fraction=fraction)
     else:
         raise Exception(f"Unknown method {method}")
 
@@ -387,7 +498,7 @@ def try_bert_distill_model_with_attention():
     print(student.bert.encoder.layer[5])
     print(student.bert.encoder.layer[5].attention.self.query.weight.size())
 
-    m = BertDistillWithAttentionModel(teacher, student, alpha=.5, beta=1.)
+    m = BertDistillWithAttentionModel(teacher, student, alpha=.5, beta=.5)
 
     xs = ["lil bert went for a walk", "he found ernie [PAD] [PAD] [PAD]"]
     xtoks = [torch.tensor(tok.encode(x)).unsqueeze(0) for x in xs]
@@ -448,6 +559,9 @@ if __name__ == '__main__':
     # sys.exit()
     # try_reduce_project_dim_selfattnlayer()
     # sys.exit()
+    # try_prune_linear()
+    try_prune_lil_bert()
+    sys.exit()
     try_bert_distill_model_with_attention()
     sys.exit()
     try_bert_distill_model()
