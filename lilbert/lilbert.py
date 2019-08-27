@@ -282,16 +282,19 @@ class PrunedLinear(torch.nn.Module):
         self.weight, self.bias = linear.weight, linear.bias
         self.W_mask = None
         self._debug = DEBUG
+        self._lastfrac = 1.00001
 
     def prune_magnitude(self, frac):
+        assert(frac < self._lastfrac)
         vals, ids = torch.sort(self.weight.view(-1).abs(), descending=True)
         numretained = int(frac * len(vals)) - 1
         cutoff_value = vals[numretained]
         self.W_mask = self.weight.abs() >= cutoff_value
         self.weight = torch.nn.Parameter((self.weight * self.W_mask.float()).detach())
+        self._lastfrac = frac
         if self._debug:
             numleft = self.W_mask.sum().float().detach().cpu().item()
-            print(f"Number of elements left: {numleft/(self.weight.size(0)*self.weight.size(1))}% {numleft} ({numretained}) with cutoff {cutoff_value} for frac={frac}")
+            print(f"Number of elements left: {100*numleft/(self.weight.size(0)*self.weight.size(1)):.2f}% {numleft} ({numretained}) with cutoff {cutoff_value} for frac={frac}")
 
     def forward(self, input):
         weight = self.weight * self.W_mask.float() if self.W_mask is not None else self.weight
@@ -314,17 +317,20 @@ class PrunedEmbedding(torch.nn.Embedding):
         self.weight = torch.nn.Parameter(emb.weight.detach())
         self.sparse = emb.sparse
         self.W_mask = None
+        self._lastfrac = 1.00001
         self._debug = DEBUG
 
     def prune_magnitude(self, frac):
+        assert(frac < self._lastfrac)
         vals, ids = torch.sort(self.weight.abs(), descending=True, dim=1)
         numretained = int(frac * vals.size(1)) - 1
         cutoff_values = vals[:, numretained]
         self.W_mask = self.weight.abs() >= (cutoff_values.unsqueeze(1))
         self.weight = torch.nn.Parameter((self.weight * self.W_mask.float()).detach())
+        self._lastfrac = frac
         if self._debug:
             numleft = self.W_mask.sum().float().detach().cpu().item()
-            print(f"Number of elements left: {numleft/(self.weight.size(0)*self.weight.size(1))}% {numleft} ({numretained}) for frac={frac}")
+            print(f"Number of elements left: {100*numleft/(self.weight.size(0)*self.weight.size(1)):.2f}% {numleft} ({numretained}) for frac={frac}")
 
     def forward(self, input):
         weight = self.weight * self.W_mask.float() if self.W_mask is not None else self.weight
@@ -357,7 +363,9 @@ def try_prune_linear():
 def prune_linear_submodules(fraction:float, m:torch.nn.Module):
     repl_dict = {}
     for subname, submodule in m.named_children():
-        if isinstance(submodule, torch.nn.Linear):
+        if isinstance(submodule, PrunedLinear):
+            submodule.prune_magnitude(fraction)
+        elif isinstance(submodule, torch.nn.Linear):
             replacement = PrunedLinear(submodule)
             replacement.prune_magnitude(fraction)
             repl_dict[subname] = replacement
@@ -368,7 +376,9 @@ def prune_linear_submodules(fraction:float, m:torch.nn.Module):
 def prune_embedding_submodules(fraction:float, m:torch.nn.Module):
     repl_dict = {}
     for subname, submodule in m.named_children():
-        if isinstance(submodule, torch.nn.Embedding):
+        if isinstance(submodule, PrunedEmbedding):
+            submodule.prune_magnitude(fraction)
+        elif isinstance(submodule, torch.nn.Embedding):
             replacement = PrunedEmbedding(submodule)
             replacement.prune_magnitude(fraction)
             repl_dict[subname] = replacement
@@ -376,8 +386,92 @@ def prune_embedding_submodules(fraction:float, m:torch.nn.Module):
         setattr(m, k, v)
 
 
-def make_lil_bert_prune(bert: Union[pt.BertModel, BertClassifier], fraction=0.3, fraction_emb=0.5):
-    _ret_bert = copy.deepcopy(bert)
+class LinearPruner(object):
+    def __init__(self, bert: Union[pt.BertModel, BertClassifier],
+                 start_fraction=1., start_fraction_emb=1.,
+                 end_fraction=0.1, end_fraction_emb=0.5,
+                 t_total:int=None, n_steps:int=None, **kw):
+        super(LinearPruner, self).__init__(**kw)
+        assert(t_total is not None and n_steps is not None)
+        assert(n_steps < t_total)
+        self.interval = math.floor(t_total / n_steps)
+        self.fraction_step = (end_fraction - start_fraction)/ float(n_steps)
+        self.fraction_step_emb = (end_fraction_emb - start_fraction_emb)/ float(n_steps)
+
+        self.counter = 0
+        self.t_total = t_total
+        self.start_fraction = start_fraction
+        self.end_fraction = end_fraction
+        self.start_fraction_emb = start_fraction_emb
+        self.end_fraction_emb = end_fraction_emb
+
+        self.bert = bert
+
+    @classmethod
+    def init(cls,bert: Union[pt.BertModel, BertClassifier],
+                 start_fraction=1., start_fraction_emb=1.,
+                 end_fraction=0.1, end_fraction_emb=0.5,
+                 t_total:int=None, n_steps:int=None, **kw):
+        """
+        Creates prunable copy of given bert and a LinearPruner
+        :param t_total: total number of updates foreseen in training
+        :param n_steps: the number of pruning steps to perform over the whole of t_total steps
+
+        Example Usage:
+        >> bert, _ = get_bert(...)
+        >> bertc = BertClassifier(bert,...)
+        >> lilbert, pruner = LinearPruner.init(bertc, 1., 1., 0.1, 0.5, 1000, 10)
+        """
+        _bert = make_lil_bert_prune(bert, start_fraction, start_fraction_emb)
+        pruner = cls(_bert, start_fraction=start_fraction, start_fraction_emb=start_fraction_emb, end_fraction=end_fraction,
+                     end_fraction_emb=end_fraction_emb, t_total=t_total, n_steps=n_steps, **kw)
+        return _bert, pruner
+
+    def step(self):
+        self.counter += 1
+        if self.counter % self.interval == 0:
+            progress = self.counter / self.t_total
+            progress = min(1, progress)
+            fraction = (1 - progress) * self.start_fraction + progress * self.end_fraction
+            fraction_emb = (1 - progress) * self.start_fraction_emb + progress * self.end_fraction_emb
+            make_lil_bert_prune(self.bert, fraction, fraction_emb, deepcopy=False)
+
+
+def try_linear_pruner():
+    import qelos as q
+    tt = q.ticktock("try_linear_pruner")
+    bert, tokenizer = get_bert()
+    x = "[CLS] the dog went to the park [SEP]"
+    xtok = torch.tensor(tokenizer.encode(x)).unsqueeze(0)
+    print(xtok)
+    bertc = BertClassifier(bert, 768, 100)
+    bertc.eval()
+    lilbertc, pruner = LinearPruner.init(bertc, t_total=100, n_steps=10)
+    lilbertc.eval()
+    bertc_out = bertc(xtok)
+    lilbertc_out = lilbertc(xtok)
+    print(bertc_out[0].size())
+    assert(torch.allclose(bertc_out[0], lilbertc_out[0]))
+    with torch.no_grad():
+        for i in range(100):
+            pruner.step()
+            tt.tick()
+            bertc_out = bertc(xtok.repeat(1, 1))
+            tt.tock("inference on main bert")
+            tt.tick()
+            lilbertc_out = lilbertc(xtok.repeat(1, 1))
+            tt.tock("inference on lilbert")
+            print(torch.norm(bertc_out[0] - lilbertc_out[0]))
+            assert(pruner.bert == lilbertc)
+            print("Number of zeros in a self-attention layer:", (lilbertc.bert.encoder.layer[5].attention.self.query.weight == 0).sum())
+
+
+
+def make_lil_bert_prune(bert: Union[pt.BertModel, BertClassifier], fraction=0.3, fraction_emb=0.5, deepcopy=True):
+    if deepcopy:
+        _ret_bert = copy.deepcopy(bert)
+    else:
+        _ret_bert = bert
     if isinstance(_ret_bert, BertClassifier):
         _bert = _ret_bert.bert
     else:
@@ -399,7 +493,26 @@ def try_prune_lil_bert():
     print(student.bert.encoder.layer[5].attention.self.query.weight)
 
 
-def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False, fraction:float=0.3, fraction_emb=0.5, method="cut"):
+####################################################################
+#
+#
+#               THIS IS AN IMPORTANT FUNCTION !!!
+#
+#
+####################################################################
+def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False,
+                  fraction:float=0.3, fraction_emb=0.5, method="cut"):
+    """
+    :param bert:
+    :param dim:         only used when method == "cut"
+    :param vanilla:     Whether to reset network weights (except embeddings) to vanilla params. Only used when method == "cut"
+    :param vanilla_emb: Whether to reset embedding weights to vanilla params. Only used when method == "cut"
+    :param fraction:    Fraction of weights to retain in the bert layers (except embedding and output layers). 'fraction' amount of weights in given 'bert' will be retained, lowest magnitude is pruned.
+    :param fraction_emb: Same as fraction but for embeddings.
+    :param method:      Must be "cut" or "prune"
+    :return:
+    """
+    # fractions are remain fractions (how many weights are retained after pruning)
     if method == "cut":
         print("using method CUT")
         return make_lil_bert_cut(bert, dim=dim, vanilla=vanilla, vanilla_emb=vanilla_emb)
@@ -563,6 +676,8 @@ if __name__ == '__main__':
     # try_reduce_project_dim_selfattnlayer()
     # sys.exit()
     # try_prune_linear()
+    try_linear_pruner()
+    sys.exit()
     try_prune_lil_bert()
     sys.exit()
     try_bert_distill_model_with_attention()
