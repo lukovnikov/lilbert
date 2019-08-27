@@ -282,10 +282,10 @@ class PrunedLinear(torch.nn.Module):
         self.weight, self.bias = linear.weight, linear.bias
         self.W_mask = None
         self._debug = DEBUG
-        self._lastfrac = 1.00001
+        self._lastfrac = 1.0
 
     def prune_magnitude(self, frac):
-        assert(frac < self._lastfrac)
+        assert(frac <= self._lastfrac)
         vals, ids = torch.sort(self.weight.view(-1).abs(), descending=True)
         numretained = int(frac * len(vals)) - 1
         cutoff_value = vals[numretained]
@@ -317,11 +317,11 @@ class PrunedEmbedding(torch.nn.Embedding):
         self.weight = torch.nn.Parameter(emb.weight.detach())
         self.sparse = emb.sparse
         self.W_mask = None
-        self._lastfrac = 1.00001
+        self._lastfrac = 1.0
         self._debug = DEBUG
 
     def prune_magnitude(self, frac):
-        assert(frac < self._lastfrac)
+        assert(frac <= self._lastfrac)
         vals, ids = torch.sort(self.weight.abs(), descending=True, dim=1)
         numretained = int(frac * vals.size(1)) - 1
         cutoff_values = vals[:, numretained]
@@ -395,10 +395,8 @@ class LinearPruner(object):
         assert(t_total is not None and n_steps is not None)
         assert(n_steps < t_total)
         self.interval = math.floor(t_total / n_steps)
-        self.fraction_step = (end_fraction - start_fraction)/ float(n_steps)
-        self.fraction_step_emb = (end_fraction_emb - start_fraction_emb)/ float(n_steps)
 
-        self.counter = 0
+        self.counter = self.interval
         self.t_total = t_total
         self.start_fraction = start_fraction
         self.end_fraction = end_fraction
@@ -428,13 +426,13 @@ class LinearPruner(object):
         return _bert, pruner
 
     def step(self):
-        self.counter += 1
         if self.counter % self.interval == 0:
             progress = self.counter / self.t_total
             progress = min(1, progress)
             fraction = (1 - progress) * self.start_fraction + progress * self.end_fraction
             fraction_emb = (1 - progress) * self.start_fraction_emb + progress * self.end_fraction_emb
             make_lil_bert_prune(self.bert, fraction, fraction_emb, deepcopy=False)
+        self.counter += 1
 
 
 def try_linear_pruner():
