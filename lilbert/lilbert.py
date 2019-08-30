@@ -408,7 +408,7 @@ class LinearPruner(object):
     @classmethod
     def init(cls,bert: Union[pt.BertModel, BertClassifier],
                  start_fraction=1., start_fraction_emb=1.,
-                 end_fraction=0.1, end_fraction_emb=0.5,
+                 end_fraction=0.1, end_fraction_emb=0.4,
                  t_total:int=None, n_steps:int=None, **kw):
         """
         Creates prunable copy of given bert and a LinearPruner
@@ -583,6 +583,27 @@ def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim: int = 420,
     return _bert_ret
 
 
+def try_timeit_lil_bert_cut():
+    teacher, tok = get_bert()
+    student = make_lil_bert(teacher, dim=252)
+
+    x = "lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies"
+    # x = "lil bert went for a walk and found roberta. Later they married and had lots of ernies"
+    # x = "lil bert went for a walk"
+    xtok = torch.tensor(tok.encode(x)).unsqueeze(0)
+
+    import timeit
+    def timeit_f_wrap(m, x):
+        def timeit_f():
+            m(x)
+        return timeit_f
+
+    N = 100
+    teacher_time = timeit.timeit(timeit_f_wrap(teacher, xtok), number=N)
+    student_time = timeit.timeit(timeit_f_wrap(student, xtok), number=N)
+    print(f"Teacher time: {teacher_time:.2f} \n\tvs student time: {student_time:.2f}  ({N} runs) \n\ton an input of length {len(x.split())}")
+
+
 def try_bert_distill_model():
     teacher, tok = get_bert()
     student, _ = get_bert()
@@ -674,6 +695,8 @@ if __name__ == '__main__':
     # try_reduce_project_dim_selfattnlayer()
     # sys.exit()
     # try_prune_linear()
+    try_timeit_lil_bert_cut()
+    sys.exit()
     try_linear_pruner()
     sys.exit()
     try_prune_lil_bert()
