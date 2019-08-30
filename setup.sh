@@ -1,4 +1,9 @@
 # clone pytorch-transformers
 mkdir transformers
-git clone https://github.com/huggingface/pytorch-transformers.git transformers
+git clone https://github.com/lukovnikov/pytorch-transformers.git transformers
 touch transformers/__init__.py
+
+# Manage data
+mkdir lilbert/dataset
+cd lilbert/utils
+python glue_download_script.py --data_dir ../dataset --tasks all

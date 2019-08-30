@@ -419,11 +419,11 @@ if __name__ == '__main__':
         only_teacher=False,
         t_total=10000,
         n_steps=100,
-        data_dir='dataset/glue/MNLI',
+        data_dir='dataset/RTE',
         model_type='bert',
         model_name='bert-base-cased',
         model_name_or_path='bert-base-uncased',
-        task_name='MNLI',
+        task_name='RTE',
         output_dir='output/bert/',
         output_name='_model.pt',
         config_name='bert-base-cased',  # change according to model name. Should be same as model name.
@@ -459,6 +459,12 @@ if __name__ == '__main__':
         server_port='',
         pruner=None,
         call_wandb=False)
+
+    # Diff in args
+    args.call_wandb = True
+    args.mode = 'loss_in_train_loop'
+    args.only_teacher = True
+    args.save = True
 
     # number of classes for a given dataset
     args.numclasses =  GLUE_TASKS_NUM_LABELS[args.task_name.lower()]
