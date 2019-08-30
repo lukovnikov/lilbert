@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 import sys
+
 sys.path.append("../transformers/")
 sys.path.append("../lilbert")
 
@@ -24,7 +25,6 @@ from utils import goodies as gd
 from utils_glue import (compute_metrics, convert_examples_to_features,
                         output_modes, processors, GLUE_TASKS_NUM_LABELS)
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -38,7 +38,6 @@ def set_seed(args):
 
 def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
     """ Train the model """
-
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
@@ -63,17 +62,12 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
 
-    if args.call_wandb:
-        wandb['optimizer'] = type(optimizer).__name__
-        wandb['scheduler'] = type(scheduler).__name__
-
     if args.fp16:
         try:
             from apex import amp
         except ImportError:
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
-
 
     # Train!
     logger.info("***** Running training *****")
@@ -86,16 +80,13 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-
     global_step = 0
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
 
-
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     previous_accuracy = 0
-
 
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
@@ -154,10 +145,10 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
             iter_loss = loss.item()
             tr_loss += iter_loss
 
-            #logging loss for wandb
+            # logging loss for wandb
             if global_step % args.logging_loss_steps == 0 and args.call_wandb:
                 # log the loss here
-                wandb.log({'iter_loss':iter_loss})
+                wandb.log({'iter_loss': iter_loss})
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 scheduler.step()  # Update learning rate schedule
@@ -173,12 +164,12 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
                         results = evaluate(args, model, tokenizer)
 
                         if args.call_wandb:
-                            wandb.log({k:v for k,v in results.items()})
+                            wandb.log({k: v for k, v in results.items()})
 
                         if previous_accuracy < results['acc']:
                             previous_accuracy = results['acc']
                             if args.call_wandb:
-                                wandb.log({'best_acc':previous_accuracy})
+                                wandb.log({'best_acc': previous_accuracy})
                             # save the model here
                             if args.save:
                                 gd.save_model(model=model, output_dir=args.output_dir,
@@ -188,7 +179,7 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
                         # for key, value in results.items():
                         #     tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
                     if args.call_wandb:
-                        wandb.log({'lr':scheduler.get_lr()[0]})
+                        wandb.log({'lr': scheduler.get_lr()[0]})
                         wandb.log({'loss': tr_loss - logging_loss})
 
                     # tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
@@ -205,7 +196,7 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
 
     if args.call_wandb:
         wandb.config['global_step'] = global_step
-        wandb.config['global_loss'] = tr_loss/global_step
+        wandb.config['global_loss'] = tr_loss / global_step
     return global_step, tr_loss / global_step
 
 
@@ -278,7 +269,7 @@ def evaluate(args, model, tokenizer, prefix=""):
                     eval_loss += loss.mean().item()
 
             if args.call_wandb:
-                wandb.log({'eval_loss':eval_loss})
+                wandb.log({'eval_loss': eval_loss})
 
             nb_eval_steps += 1
             if preds is None:
@@ -287,7 +278,6 @@ def evaluate(args, model, tokenizer, prefix=""):
             else:
                 preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
                 out_label_ids = np.append(out_label_ids, inputs['labels'].detach().cpu().numpy(), axis=0)
-
 
         if args.output_mode == "classification":
             preds = np.argmax(preds, axis=1)
@@ -356,7 +346,6 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False):
 
 
 def main(args, model, tokenizer):
-
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     args.n_gpu = torch.cuda.device_count()
     args.device = device
@@ -380,7 +369,6 @@ def main(args, model, tokenizer):
     num_labels = len(label_list)
     args.num_labels = num_labels
 
-
     model.to(args.device)
     logger.info("Training/evaluation parameters %s", args)
 
@@ -388,7 +376,7 @@ def main(args, model, tokenizer):
         logger.info(f"dataset chossen is {args.task_name}")
         train_dataset = load_and_cache_examples(args, args.task_name, tokenizer, evaluate=False)
         logger.info("About to begin training")
-        global_step, tr_loss = train(args=args,  train_dataset=train_dataset, model=model, tokenizer=tokenizer)
+        global_step, tr_loss = train(args=args, train_dataset=train_dataset, model=model, tokenizer=tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
 
@@ -445,7 +433,7 @@ if __name__ == '__main__':
         max_steps=-1,
         warmup_steps=0,
         logging_steps=1000,
-        logging_loss_steps = 10,
+        logging_loss_steps=10,
         save_steps=1000,
         eval_all_checkpoints=True,
         no_cuda=False,
@@ -458,16 +446,23 @@ if __name__ == '__main__':
         server_ip='',
         server_port='',
         pruner=None,
-        call_wandb=False)
+        call_wandb=False,
+        alpha=0.8)
 
     # Diff in args
     args.call_wandb = True
     args.mode = 'loss_in_train_loop'
+    args.logging_loss_steps = 100
+    args.logging_steps = 100
+    args.method = 'cut'
+    args.loss_type = 'attention'
+    args.task_name = 'SST-2'
+    args.data_dir = 'dataset/SST-2'
     args.only_teacher = True
     args.save = True
 
     # number of classes for a given dataset
-    args.numclasses =  GLUE_TASKS_NUM_LABELS[args.task_name.lower()]
+    args.numclasses = GLUE_TASKS_NUM_LABELS[args.task_name.lower()]
 
     if args.mode == 'loss_in_train_loop':
 
@@ -480,21 +475,22 @@ if __name__ == '__main__':
             # Snippet to make a bert classifier with lesser dim - 5,6
             teacher, tok = lilbert.get_bert()
             student = lilbert.make_lil_bert(teacher.bert, dim=args.student_dim, method="cut",
-                                                vanilla=args.from_scratch)  # This can TAKE BOTH TEACHER AS WELL AS TEACHER.BERT
+                                            vanilla=args.from_scratch)  # This can TAKE BOTH TEACHER AS WELL AS TEACHER.BERT
             model = lilbert.BertClassifier(student, args.student_dim, args.numclasses)
 
     elif args.mode == 'loss_in_model':
 
         # Lilbert with attention distillation - 2a
         _, tok = lilbert.get_bert()
-        teacher = torch.load(args.output_dir + args.output_name + args.task_name)
+        teacher = torch.load(args.output_dir + args.task_name.lower() + args.output_name)
 
         # Make Lilbert.
         if args.method == 'prune':  # 2
             student, pruner = lilbert.make_lil_bert(teacher, fraction=0.1, fraction_emb=0.1, method="prune",
                                                     vanilla=args.from_scratch), None
         elif args.method == 'cut':  # 3
-            student, pruner = lilbert.make_lil_bert(teacher, dim=args.student_dim, method="cut", vanilla=args.from_scratch), None
+            student, pruner = lilbert.make_lil_bert(teacher, dim=args.student_dim, method="cut",
+                                                    vanilla=args.from_scratch), None
         elif args.method == 'linear_pruning':
             student, pruner = lilbert.LinearPruner.init(teacher, t_total=args.t_total, n_steps=args.n_steps)
         else:
@@ -503,11 +499,12 @@ if __name__ == '__main__':
 
         # Loss function
         if args.loss_type == 'attention':
-            m = lilbert.BertDistillWithAttentionModel(teacher, student, alpha=.5)
+            model = lilbert.BertDistillWithAttentionModel(teacher, student, alpha=args.alpha)
         elif args.loss_type == 'distill':
-            m = lilbert.BertDistillModel(teacher, student, alpha=.5)
+            model = lilbert.BertDistillModel(teacher, student, alpha=args.alpha)
         else:
             raise gd.UnknownLossType(f"The loss method {args.loss_type} is not known.")
+
     else:
         raise gd.UnknownMode(f"{args.mode} is not a known mode.")
 
@@ -518,4 +515,4 @@ if __name__ == '__main__':
         for k, v in args.items():
             wandb.config[k] = v
 
-    main(args=args, model=m, tokenizer=tok)
+    main(args=args, model=model, tokenizer=tok)
