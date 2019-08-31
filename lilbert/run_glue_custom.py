@@ -450,7 +450,7 @@ if __name__ == '__main__':
         alpha=0.5)
 
     # Diff in args
-    args.call_wandb = False
+    args.call_wandb = True
     args.mode = 'loss_in_train_loop'
     args.logging_loss_steps = 100
     args.logging_steps = 100
