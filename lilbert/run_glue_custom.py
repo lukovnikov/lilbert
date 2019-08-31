@@ -447,20 +447,25 @@ if __name__ == '__main__':
         server_port='',
         pruner=None,
         call_wandb=False,
-        alpha=0.8)
+        alpha=0.5)
 
     # Diff in args
-    args.call_wandb = True
+    args.call_wandb = False
     args.mode = 'loss_in_train_loop'
     args.logging_loss_steps = 100
     args.logging_steps = 100
     args.method = 'cut'
-    args.loss_type = 'attention'
+    args.loss_type = 'distill'
     args.task_name = 'SST-2'
     args.data_dir = 'dataset/SST-2'
     args.only_teacher = True
     args.save = True
 
+
+    if args.save:
+        assert args.only_teacher is True and args.mode == 'loss_in_train_loop', "the codebase only " \
+                                          "supports saving teacher. To train " \
+                                          "teacher set only_teacher args to true"
     # number of classes for a given dataset
     args.numclasses = GLUE_TASKS_NUM_LABELS[args.task_name.lower()]
 
