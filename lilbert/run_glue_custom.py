@@ -166,7 +166,18 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
                         if args.call_wandb:
                             wandb.log({k: v for k, v in results.items()})
 
-                        if previous_accuracy < results['acc']:
+                        for k,v in results.items():
+                            if k == 'acc':
+                                key = 'acc'
+                            elif k == 'mcc':
+                                key = 'mcc'
+                            elif k == 'corr':
+                                key = 'corr'
+                            else:
+                                raise gd.UnknownAccuracyMetric(f"The current training loop only"
+                                                               f" supports acc, mcc, corr and found {k}")
+
+                        if previous_accuracy < results['acc']:          # acc, mcc, corr
                             previous_accuracy = results['acc']
                             if args.call_wandb:
                                 wandb.log({'best_acc': previous_accuracy})
@@ -174,6 +185,18 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
                             if args.save:
                                 gd.save_model(model=model, output_dir=args.output_dir,
                                               model_name=args.task_name + args.output_name, accuracy=results['acc'],
+                                              config={"mode": args.mode})
+
+
+                        if previous_accuracy < results[key]:          # acc, mcc, corr.
+                            # Note that previous accuracy could be acc, mrr, corr
+                            previous_accuracy = results[key]
+                            if args.call_wandb:
+                                wandb.log({'best_acc': previous_accuracy})
+                            # save the model here
+                            if args.save:
+                                gd.save_model(model=model, output_dir=args.output_dir,
+                                              model_name=args.task_name + args.output_name, accuracy=results[key],
                                               config={"mode": args.mode})
 
                         # for key, value in results.items():
@@ -461,8 +484,8 @@ if __name__ == '__main__':
     args.only_teacher = True
     args.save = True
     args.alpha = 0.2
-    args.data_dir = 'dataset/MRPC'
-    args.task_name = 'MRPC'
+    args.data_dir = 'dataset/CoLA'
+    args.task_name = 'CoLA'
 
     if args.save:
         assert args.only_teacher is True and args.mode == 'loss_in_train_loop', "the codebase only " \

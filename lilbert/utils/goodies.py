@@ -7,6 +7,7 @@ from pathlib import Path
 class UnknownMethod(Exception): pass
 class UnknownMode(Exception): pass
 class UnknownLossType(Exception): pass
+class UnknownAccuracyMetric(Exception): pass
 
 create_dir = lambda dir_location: dir_location.mkdir(parents=True, exist_ok=True)
 
