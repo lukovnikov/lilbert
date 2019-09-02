@@ -177,15 +177,7 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
                                 raise gd.UnknownAccuracyMetric(f"The current training loop only"
                                                                f" supports acc, mcc, corr and found {k}")
 
-                        if previous_accuracy < results['acc']:          # acc, mcc, corr
-                            previous_accuracy = results['acc']
-                            if args.call_wandb:
-                                wandb.log({'best_acc': previous_accuracy})
-                            # save the model here
-                            if args.save:
-                                gd.save_model(model=model, output_dir=args.output_dir,
-                                              model_name=args.task_name + args.output_name, accuracy=results['acc'],
-                                              config={"mode": args.mode})
+
 
 
                         if previous_accuracy < results[key]:          # acc, mcc, corr.
