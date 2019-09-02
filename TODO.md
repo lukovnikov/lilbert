@@ -5,6 +5,13 @@
 5) Append TaskName to accuracy and other dumping things!
 6) Fix up logging intelligently.
 7) Also keep alpha from args
+8) **Fix metrics problems e.g. when running CoLA**
 ----
 
 1. Run optimizer.step before schedulers.step
+2. Benchmark speed and memory for multiple settings.
+
+---
+
+1. Experiment with layer dropping.
+2. Experiment with KL divergence loss. 

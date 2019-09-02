@@ -447,7 +447,9 @@ if __name__ == '__main__':
         server_port='',
         pruner=None,
         call_wandb=False,
-        alpha=0.5)
+        alpha=0.5,
+        prune_frac=0.1,
+        prune_frac_emb=0.5)
 
     # Diff in args
     args.call_wandb = True
@@ -456,16 +458,16 @@ if __name__ == '__main__':
     args.logging_steps = 100
     args.method = 'cut'
     args.loss_type = 'distill'
-    args.task_name = 'SST-2'
-    args.data_dir = 'dataset/SST-2'
     args.only_teacher = True
     args.save = True
-
+    args.alpha = 0.2
+    args.data_dir = 'dataset/MRPC'
+    args.task_name = 'MRPC'
 
     if args.save:
         assert args.only_teacher is True and args.mode == 'loss_in_train_loop', "the codebase only " \
-                                          "supports saving teacher. To train " \
-                                          "teacher set only_teacher args to true"
+                                                                                "supports saving teacher. To train " \
+                                                                                "teacher set only_teacher args to true"
     # number of classes for a given dataset
     args.numclasses = GLUE_TASKS_NUM_LABELS[args.task_name.lower()]
 
@@ -491,7 +493,7 @@ if __name__ == '__main__':
 
         # Make Lilbert.
         if args.method == 'prune':  # 2
-            student, pruner = lilbert.make_lil_bert(teacher, fraction=0.1, fraction_emb=0.1, method="prune",
+            student, pruner = lilbert.make_lil_bert(teacher, fraction=args.prune_frac, fraction_emb=args.prune_frac_emb, method="prune",
                                                     vanilla=args.from_scratch), None
         elif args.method == 'cut':  # 3
             student, pruner = lilbert.make_lil_bert(teacher, dim=args.student_dim, method="cut",
