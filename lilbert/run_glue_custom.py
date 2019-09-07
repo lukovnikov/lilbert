@@ -175,9 +175,14 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
                                 key = 'corr'
                             elif k == 'f1':
                                 key = 'f1'
+                            elif k == 'acc_and_f1':
+                                key = 'acc_and_f1'
+                            elif k == 'pearson':
+                                key = 'pearson'
                             else:
                                 raise gd.UnknownAccuracyMetric(f"The current training loop only"
-                                                               f" supports acc, mcc, corr, and f1. Found {k}")
+                                                               f" supports acc, mcc, corr, acc_and_f1, f1 and pearson"
+                                                               f". Found {k}")
 
 
 
@@ -478,8 +483,11 @@ if __name__ == '__main__':
     args.only_teacher = True
     args.save = True
     args.alpha = 0.2
-    args.data_dir = 'dataset/QQP'
-    args.task_name = 'QQP'
+    args.data_dir = 'dataset/STS-B'
+    args.task_name = 'STS-B'
+
+    # various experiment varioation
+
 
     if args.save:
         assert args.only_teacher is True and args.mode == 'loss_in_train_loop', "the codebase only " \
