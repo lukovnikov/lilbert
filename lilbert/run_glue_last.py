@@ -37,11 +37,14 @@ from pytorch_transformers import (WEIGHTS_NAME, BertConfig,
                                   XLMTokenizer, XLNetConfig,
                                   XLNetForSequenceClassification,
                                   XLNetTokenizer)
+from pytorch_transformers import BertPreTrainedModel, BertModel
+from torch import nn
 
 from pytorch_transformers import AdamW, WarmupLinearSchedule
 
 from utils_glue import (compute_metrics, convert_examples_to_features,
                         output_modes, processors)
+
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,38 @@ MODEL_CLASSES = {
     'xlnet': (XLNetConfig, XLNetForSequenceClassification, XLNetTokenizer),
     'xlm': (XLMConfig, XLMForSequenceClassification, XLMTokenizer),
 }
+
+
+class TwoFacedBertForSequenceClassification(torch.nn.Module):
+    def __init__(self, bertforseq, numlast=2, **kw):
+        super(BertForSequenceClassification, self).__init__(**kw)
+        self.prebertseq, self.postbertseq = split_bert_for_seq(bertforseq)
+
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None,
+                position_ids=None, head_mask=None):
+        with torch.no_grad():
+            self.prebertseq(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
+                            attention_mask=attention_mask, head_mask=head_mask)
+        outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
+                            attention_mask=attention_mask, head_mask=head_mask)
+        pooled_output = outputs[1]
+
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        outputs = (logits,) + outputs[2:]  # add hidden states and attention if they are here
+
+        if labels is not None:
+            if self.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            outputs = (loss,) + outputs
+
+        return outputs  # (loss), logits, (hidden_states), (attentions)
 
 
 def set_seed(args):
@@ -376,10 +411,7 @@ def main():
                         help="For distributed training: local_rank")
     parser.add_argument('--server_ip', type=str, default='', help="For distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="For distant debugging.")
-
-    # added here
     parser.add_argument('--gpu', type=int, default=-1, help="Which GPU to run on")
-    parser.add_argument('--finetune_last', type=int, default=-1, help="How many last layers to finetune (if != -1, embeddings are always frozen, given number must be < number of encoder layers)")
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
@@ -435,12 +467,6 @@ def main():
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path, num_labels=num_labels, finetuning_task=args.task_name)
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case=args.do_lower_case)
     model = model_class.from_pretrained(args.model_name_or_path, from_tf=bool('.ckpt' in args.model_name_or_path), config=config)
-
-    if args.finetune_last > -1:
-        model.bert.embeddings._no_grad = True
-        num_bert_layers = len(model.bert.encoder.layer)
-        for i in range(0, num_bert_layers - args.finetune_last):
-            model.bert.encoder.layer[i]._no_grad = True
 
     if args.local_rank == 0:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
