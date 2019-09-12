@@ -10,6 +10,7 @@ import torch
 import wandb
 import random
 import logging
+import argparse
 import numpy as np
 from typing import Union
 from tqdm import tqdm, trange
@@ -179,9 +180,12 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
                                 key = 'acc_and_f1'
                             elif k == 'pearson':
                                 key = 'pearson'
+                            elif k == 'spearmanr':
+                                key = 'spearmanr'
                             else:
                                 raise gd.UnknownAccuracyMetric(f"The current training loop only"
-                                                               f" supports acc, mcc, corr, acc_and_f1, f1 and pearson"
+                                                               f" supports acc, mcc, corr, acc_and_f1, f1, pearson,"
+                                                               f" and spearmanr"
                                                                f". Found {k}")
 
 
@@ -475,19 +479,40 @@ if __name__ == '__main__':
 
     # Diff in args
     args.call_wandb = True
-    args.mode = 'loss_in_train_loop'
-    args.logging_loss_steps = 100
-    args.logging_steps = 100
+    args.mode = 'loss_in_model'
+
     args.method = 'cut'
-    args.loss_type = 'distill'
-    args.only_teacher = True
-    args.save = True
-    args.alpha = 0.2
-    args.data_dir = 'dataset/STS-B'
-    args.task_name = 'STS-B'
+    args.loss_type = 'distill' #attention
+    args.only_teacher = False
+    args.save = False
+    args.alpha = 0.5
+    args.data_dir = 'dataset/SSTB'
+    args.task_name = 'SSTB'
 
     # various experiment varioation
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", help="increase output verbosity")
+    cmd_args = parser.parse_args()
+    if cmd_args.dataset:
+        args.task_name = cmd_args.dataset
+        args.data_dir = 'dataset/' + args.task_name
+
+    # dataset size
+    dataset_logging =  {
+        'CoLA': 100,
+        'SST-2': 1000,
+        'MRPC': 100,
+        'STS-B': 100,
+        'QQP': 1000,
+        'MNLI': 1000,
+        'QNLI': 100,
+        'RTE': 10,
+        'WNLI': 10
+    }
+
+    args.logging_loss_steps = dataset_logging['args.task_name']
+    args.logging_steps = dataset_logging['args.task_name']
 
     if args.save:
         assert args.only_teacher is True and args.mode == 'loss_in_train_loop', "the codebase only " \
