@@ -301,8 +301,8 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False):
 
 
 def train_neuronprune(args, train_dataset, np_model, tokenizer):
-    bertc = lilbert.make_lil_bert_cut(np_model.m, dim=args.neuron_prune)
-    bertm = lilbert.BertClassifierModel(bertc)
+    # bertc = lilbert.make_lil_bert_cut(np_model.m, dim=args.neuron_prune)
+    bertm = lilbert.BertClassifierModel(np_model.m)
     return bertm
 
 
