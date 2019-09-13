@@ -511,8 +511,8 @@ if __name__ == '__main__':
         'WNLI': 10
     }
 
-    args.logging_loss_steps = dataset_logging['args.task_name']
-    args.logging_steps = dataset_logging['args.task_name']
+    args.logging_loss_steps = dataset_logging[args.task_name]
+    args.logging_steps = dataset_logging[args.task_name]
 
     if args.save:
         assert args.only_teacher is True and args.mode == 'loss_in_train_loop', "the codebase only " \
