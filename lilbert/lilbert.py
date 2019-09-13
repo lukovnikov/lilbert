@@ -676,13 +676,33 @@ def try_masked_cut_vs_actual_cut():
     mask_y = mask_student(xtok)
     cut_y = cut_student(xtok)
 
-    # print(mask_y)
-    # print(cut_y)
+    print(mask_y[0].size())
+    print(cut_y[0].size())
     print(mask_y[0][:, :, :252] - cut_y[0])
     assert(torch.allclose(mask_y[0][:, :, :252], cut_y[0], atol=1e-6))
     assert(torch.allclose(mask_y[0][:, :, 252:], torch.zeros_like(mask_y[0][:, :, 252:])))
 
 
+def try_masked_cut_vs_actual_cut_cls():
+    teacher, tok = get_bert()
+    teacher = BertClassifier(teacher, 768, 2)
+    mask_student = make_lil_bert_cut(teacher, dim=252)
+    cut_student = make_lil_bert_actual_cut(teacher, dim=252, vanilla=False)
+    mask_student.eval()
+    cut_student.eval()
+
+    x = "lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies"
+    # x = "lil bert went for a walk and found roberta. Later they married and had lots of ernies"
+    # x = "lil bert went for a walk"
+    xtok = torch.tensor(tok.encode(x)).unsqueeze(0)
+
+    mask_y = mask_student(xtok)
+    cut_y = cut_student(xtok)
+
+    print(mask_y[0].size())
+    print(cut_y[0].size())
+    print(mask_y[0] - cut_y[0])
+    assert(torch.allclose(mask_y[0], cut_y[0], atol=1e-6))
 
 
 def try_bert_distill_model():
@@ -776,7 +796,8 @@ if __name__ == '__main__':
     # try_reduce_project_dim_selfattnlayer()
     # sys.exit()
     # try_prune_linear()
-    try_masked_cut_vs_actual_cut()
+    try_masked_cut_vs_actual_cut_cls()
+    # try_masked_cut_vs_actual_cut()
     sys.exit()
     try_timeit_lil_bert_cut()
     sys.exit()
