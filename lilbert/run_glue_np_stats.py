@@ -43,7 +43,7 @@ from pytorch_transformers import AdamW, WarmupLinearSchedule
 from utils_glue import (compute_metrics, convert_examples_to_features,
                         output_modes, processors)
 
-from lilbert import lilbert
+import lilbert
 
 logger = logging.getLogger(__name__)
 
