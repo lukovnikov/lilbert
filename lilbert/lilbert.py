@@ -531,8 +531,21 @@ def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, van
         raise Exception(f"Unknown method {method}")
 
 
+def _get_cutter_mask(basedim, dim, method="last", device=None):
+    if method == "last":
+        _basernd = torch.arange(basedim, device=device)
+    elif method == "first":
+        _basernd = torch.arange(basedim, device=device).flip(-1)
+    elif method == "random":
+        _basernd = torch.randperm(basedim, device=device)
+
+    ret = _basernd < dim
+    ret = ret.float()
+    return ret
+
+
 def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim:int = 420, vanilla=False, vanilla_emb=False,
-                      prune_which="last"):
+                      prune_how="last"):
     """ cutting bert by mask (not actually cutting anything, just setting masks) """
     assert(vanilla == False and vanilla_emb == False)
 
@@ -547,35 +560,26 @@ def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim:int = 420, 
     lil_bert = _bert
     basedim = _bert.embeddings.word_embeddings.embedding_dim
     device = _bert.embeddings.word_embeddings.weight.device
-    basemask = torch.ones(basedim, dtype=torch.float, device=device)       # must be shared
-    if prune_which == "last":
-        basemask[dim:] = 0
-    elif prune_which == "first":
-        basemask[:-dim] = 0
+    basemask = _get_cutter_mask(basedim, dim, method=prune_how, device=device)
     # lil embeddings
     _bert.embeddings.set_np_mask(basemask)
     # lil pooler
     _bert.pooler.set_np_mask(basemask)
     # lil encoder
-    attmask = torch.ones(_bert.config.num_attention_heads, basedim // _bert.config.num_attention_heads, dtype=torch.float, device=device)
-    if prune_which == "last":
-        attmask[:, dim // _bert.config.num_attention_heads:] = 0
-    elif prune_which == "first":
-        attmask[:, :-dim // _bert.config.num_attention_heads] = 0
     interdim = _bert.encoder.layer[0].output.dense.in_features
-    intermask = torch.ones(interdim, dtype=torch.float, device=device)
-    if prune_which == "last":
-        intermask[int(interdim * (dim/basedim)):] = 0
-    elif prune_which == "first":
-        intermask[:-int(interdim * (dim/basedim))] = 0
     for lil_layer in lil_bert.encoder.layer:
         # print(lil_layer)
+        attmasks = [_get_cutter_mask(basedim // _bert.config.num_attention_heads, dim // _bert.config.num_attention_heads, method=prune_how, device=device)]
+        attmask = torch.stack(attmasks, 0)
+        valmasks = [_get_cutter_mask(basedim // _bert.config.num_attention_heads, dim // _bert.config.num_attention_heads, method=prune_how, device=device)]
+        valmask = torch.stack(valmasks, 0)
         lil_attention = lil_layer.attention.self
-        lil_attention.set_np_mask(attmask, attmask)
+        lil_attention.set_np_mask(attmask, valmask)
 
         lil_attention_output = lil_layer.attention.output
         lil_attention_output.set_np_mask(basemask)
 
+        intermask = _get_cutter_mask(interdim, int(interdim * (dim/basedim)), method=prune_how, device=device)
         lil_interm = lil_layer.intermediate
         lil_interm.set_np_mask(intermask)
 
