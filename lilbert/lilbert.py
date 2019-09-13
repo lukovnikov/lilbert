@@ -531,7 +531,8 @@ def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, van
         raise Exception(f"Unknown method {method}")
 
 
-def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim:int = 420, vanilla=False, vanilla_emb=False):
+def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim:int = 420, vanilla=False, vanilla_emb=False,
+                      prune_which="last"):
     """ cutting bert by mask (not actually cutting anything, just setting masks) """
     assert(vanilla == False and vanilla_emb == False)
 
@@ -547,17 +548,26 @@ def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim:int = 420, 
     basedim = _bert.embeddings.word_embeddings.embedding_dim
     device = _bert.embeddings.word_embeddings.weight.device
     basemask = torch.ones(basedim, dtype=torch.float, device=device)       # must be shared
-    basemask[dim:] = 0
+    if prune_which == "last":
+        basemask[dim:] = 0
+    elif prune_which == "first":
+        basemask[:-dim] = 0
     # lil embeddings
     _bert.embeddings.set_np_mask(basemask)
     # lil pooler
     _bert.pooler.set_np_mask(basemask)
     # lil encoder
     attmask = torch.ones(_bert.config.num_attention_heads, basedim // _bert.config.num_attention_heads, dtype=torch.float, device=device)
-    attmask[:, dim // _bert.config.num_attention_heads:] = 0
+    if prune_which == "last":
+        attmask[:, dim // _bert.config.num_attention_heads:] = 0
+    elif prune_which == "first":
+        attmask[:, :-dim // _bert.config.num_attention_heads] = 0
     interdim = _bert.encoder.layer[0].output.dense.in_features
     intermask = torch.ones(interdim, dtype=torch.float, device=device)
-    intermask[int(interdim * (dim/basedim)):] = 0
+    if prune_which == "last":
+        intermask[int(interdim * (dim/basedim)):] = 0
+    elif prune_which == "first":
+        intermask[:-int(interdim * (dim/basedim))] = 0
     for lil_layer in lil_bert.encoder.layer:
         # print(lil_layer)
         lil_attention = lil_layer.attention.self
