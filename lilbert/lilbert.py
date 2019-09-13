@@ -92,7 +92,7 @@ class BertDistillLoss(torch.nn.Module):
             self.loss = torch.nn.MSELoss(reduction=reduction)
             print("WARNING: if regression, output distillation is not done.")
 
-    def forward(self, logits, targets, targetlogits):
+    def forward(self, logits, targets, targetlogits=None):
         """
         :param logits:       (batsize, numclasses) unnormalized logits from classifier
         :param targets:      (batsize, ) int id of correct class
