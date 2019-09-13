@@ -545,17 +545,18 @@ def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim:int = 420, 
     assert (float(int(dim / _bert.config.num_attention_heads)) == dim / _bert.config.num_attention_heads)
     lil_bert = _bert
     basedim = _bert.embeddings.word_embeddings.embedding_dim
-    basemask = torch.ones(basedim, dtype=torch.float)       # must be shared
+    device = _bert.embeddings.word_embeddings.weight.device
+    basemask = torch.ones(basedim, dtype=torch.float, device=device)       # must be shared
     basemask[dim:] = 0
     # lil embeddings
     _bert.embeddings.set_np_mask(basemask)
     # lil pooler
     _bert.pooler.set_np_mask(basemask)
     # lil encoder
-    attmask = torch.ones(_bert.config.num_attention_heads, basedim // _bert.config.num_attention_heads, dtype=torch.float)
+    attmask = torch.ones(_bert.config.num_attention_heads, basedim // _bert.config.num_attention_heads, dtype=torch.float, device=device)
     attmask[:, dim // _bert.config.num_attention_heads:] = 0
     interdim = _bert.encoder.layer[0].output.dense.in_features
-    intermask = torch.ones(interdim, dtype=torch.float)
+    intermask = torch.ones(interdim, dtype=torch.float, device=device)
     intermask[int(interdim * (dim/basedim)):] = 0
     for lil_layer in lil_bert.encoder.layer:
         # print(lil_layer)
