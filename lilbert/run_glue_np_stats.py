@@ -300,6 +300,11 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False):
     return dataset
 
 
+def train_neuronprune(args, train_dataset, np_model, tokenizer):
+    ret = lilbert.make_lil_bert_cut(np_model, dim=args.neuron_prune)
+    return ret
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -470,19 +475,25 @@ def main():
         # They can then be reloaded using `from_pretrained()`
         # TODO: saving model
 
-    # neuron prune
-    if args.neuron_prune > -1:
-        assert(args.do_train)
-        np_model = None
-        global_step, tr_loss = train_neuronprune(args, train_dataset, np_model, tokenizer)
-
-
     # Evaluation
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
         result = evaluate(args, bertm, tokenizer, prefix=global_step)
         result = dict((k + '_{}'.format(global_step), v) for k, v in result.items())
         results.update(result)
+
+    # neuron prune
+    if args.neuron_prune > -1:
+        assert(args.do_train)
+        bertm_ = train_neuronprune(args, train_dataset, bertm, tokenizer)
+
+        # Evaluation
+        results = {}
+        if args.do_eval and args.local_rank in [-1, 0]:
+            result = evaluate(args, bertm_, tokenizer, prefix=global_step)
+            result = dict((k + '_{}'.format(global_step), v) for k, v in result.items())
+            results.update(result)
+
 
     return results
 
