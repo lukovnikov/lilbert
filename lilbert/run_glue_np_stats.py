@@ -127,7 +127,7 @@ def train(args, train_dataset, model, tokenizer):
             inputs = {'input_ids':      batch[0],
                       'attention_mask': batch[1],
                       'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,  # XLM and RoBERTa don't use segment_ids
-                      'labels':         batch[3]}
+                      'targets':         batch[3]}
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
 
@@ -217,7 +217,7 @@ def evaluate(args, model, tokenizer, prefix=""):
                 inputs = {'input_ids':      batch[0],
                           'attention_mask': batch[1],
                           'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,  # XLM and RoBERTa don't use segment_ids
-                          'labels':         batch[3]}
+                          'targets':         batch[3]}
                 outputs = model(**inputs)
                 tmp_eval_loss, logits = outputs[:2]
 
@@ -225,10 +225,10 @@ def evaluate(args, model, tokenizer, prefix=""):
             nb_eval_steps += 1
             if preds is None:
                 preds = logits.detach().cpu().numpy()
-                out_label_ids = inputs['labels'].detach().cpu().numpy()
+                out_label_ids = inputs['targets'].detach().cpu().numpy()
             else:
                 preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-                out_label_ids = np.append(out_label_ids, inputs['labels'].detach().cpu().numpy(), axis=0)
+                out_label_ids = np.append(out_label_ids, inputs['targets'].detach().cpu().numpy(), axis=0)
 
         eval_loss = eval_loss / nb_eval_steps
         if args.output_mode == "classification":
