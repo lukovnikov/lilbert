@@ -75,17 +75,22 @@ def reduce_embedding_dim(x:torch.nn.Embedding, dim:int):
     return x
 
 
-class ClassificationDistillLoss(torch.nn.Module):
-    def __init__(self, alpha=.5, reduction="mean", **kw):
+class BertDistillLoss(torch.nn.Module):
+    def __init__(self, alpha=.5, reduction="mean", regression=False, **kw):
         """
         :param alpha:       mixing between hard CE and distill. alpha == 1 => only hard CE loss
         :param kw:
         """
-        super(ClassificationDistillLoss, self).__init__(**kw)
+        super(BertDistillLoss, self).__init__(**kw)
         self.alpha = alpha
         self.reduction = reduction
         assert(self.reduction == "mean")
-        self.CEloss = torch.nn.CrossEntropyLoss(reduction=reduction)
+        self.regression = regression
+        if not regression:
+            self.loss = torch.nn.CrossEntropyLoss(reduction=reduction)
+        else:
+            self.loss = torch.nn.MSELoss(reduction=reduction)
+            print("WARNING: if regression, output distillation is not done.")
 
     def forward(self, logits, targets, targetlogits):
         """
@@ -94,12 +99,16 @@ class ClassificationDistillLoss(torch.nn.Module):
         :param targetlogits: (batsize, numclasses) unnormalized logits from parent classifier
         :return:
         """
-        celoss = self.CEloss(logits, targets)
-        distance = 0
-        if self.alpha < 1:
-            distance = (logits - targetlogits).norm(2, 1) ** 2
-            distance = distance.mean() if self.reduction == "mean" else distance.sum()
-        ret = celoss * self.alpha + (1 - self.alpha) * distance
+        if self.regression:
+            loss = self.loss(logits.view(-1), targets.view(-1))
+            ret = loss
+        else:
+            loss = self.loss(logits, targets)
+            distance = 0
+            if self.alpha < 1:
+                distance = (logits - targetlogits).norm(2, 1) ** 2
+                distance = distance.mean() if self.reduction == "mean" else distance.sum()
+            ret = loss * self.alpha + (1 - self.alpha) * distance
         return ret
 
 
@@ -107,7 +116,7 @@ def try_classification_distill_loss():
     logits = param(torch.rand(5, 4))
     targets = torch.randint(0, 4, (5,))
     targetlogits = param(torch.rand(5, 4))
-    loss = ClassificationDistillLoss(alpha=.5)
+    loss = BertDistillLoss(alpha=.5)
     l = loss(logits, targets, targetlogits)
     print(l)
     l.backward()
@@ -159,6 +168,7 @@ class BertClassifier(torch.nn.Module):      # almost straight from pytorch-trans
         self.bert = bert
         self.dropout = torch.nn.Dropout(dropout)
         self.classifier = torch.nn.Linear(dim, numclasses)
+        self.numclasses = numclasses
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None,
                 position_ids=None, head_mask=None):
@@ -178,7 +188,7 @@ class BertClassifierModel(torch.nn.Module):
     def __init__(self, bertclassifier:BertClassifier, **kw):
         super(BertClassifierModel, self).__init__(**kw)
         self.m = bertclassifier
-        self.loss = ClassificationDistillLoss(alpha=1.)
+        self.loss = BertDistillLoss(alpha=1., regression=self.m.numclasses == 1)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None,
                 position_ids=None, head_mask=None, targets=None):
@@ -201,7 +211,7 @@ class BertDistillModel(torch.nn.Module):
         """
         super(BertDistillModel, self).__init__(**kw)
         self.teacher, self.student = teacher, student
-        self.loss = ClassificationDistillLoss(alpha=alpha)
+        self.loss = BertDistillLoss(alpha=alpha, regression=self.teacher.numclasses == 1)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, position_ids=None, head_mask=None,
                 targets=None):
@@ -521,7 +531,53 @@ def make_lil_bert(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, van
         raise Exception(f"Unknown method {method}")
 
 
-def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False):
+def make_lil_bert_cut(bert: Union[pt.BertModel, BertClassifier], dim:int = 420, vanilla=False, vanilla_emb=False):
+    """ cutting bert by mask (not actually cutting anything, just setting masks) """
+    assert(vanilla == False and vanilla_emb == False)
+
+    _bert_ret = copy.deepcopy(bert)
+    if isinstance(_bert_ret, BertClassifier):
+        pass
+        _bert = _bert_ret.bert
+    else:
+        _bert = _bert_ret
+
+    assert (float(int(dim / _bert.config.num_attention_heads)) == dim / _bert.config.num_attention_heads)
+    lil_bert = _bert
+    basedim = _bert.embeddings.word_embeddings.embedding_dim
+    basemask = torch.ones(basedim, dtype=torch.float)       # must be shared
+    basemask[dim:] = 0
+    # lil embeddings
+    _bert.embeddings.set_np_mask(basemask)
+    # lil pooler
+    _bert.pooler.set_np_mask(basemask)
+    # lil encoder
+    attmask = torch.ones(_bert.config.num_attention_heads, basedim // _bert.config.num_attention_heads, dtype=torch.float)
+    attmask[:, dim // _bert.config.num_attention_heads:] = 0
+    interdim = _bert.encoder.layer[0].output.dense.in_features
+    intermask = torch.ones(interdim, dtype=torch.float)
+    intermask[int(interdim * (dim/basedim)):] = 0
+    for lil_layer in lil_bert.encoder.layer:
+        # print(lil_layer)
+        lil_attention = lil_layer.attention.self
+        lil_attention.set_np_mask(attmask, attmask)
+
+        lil_attention_output = lil_layer.attention.output
+        lil_attention_output.set_np_mask(basemask)
+
+        lil_interm = lil_layer.intermediate
+        lil_interm.set_np_mask(intermask)
+
+        lil_output = lil_layer.output
+        lil_output.set_np_mask(basemask)
+        # print(lil_layer)
+
+    # print(lil_bert)
+    return _bert_ret
+
+
+
+def make_lil_bert_actual_cut(bert: Union[pt.BertModel, BertClassifier], dim: int = 420, vanilla=True, vanilla_emb=False):      # neuron pruning
     def reset_params(x):
         if hasattr(x, "reset_parameters"):
             x.reset_parameters()
@@ -602,6 +658,30 @@ def try_timeit_lil_bert_cut():
     teacher_time = timeit.timeit(timeit_f_wrap(teacher, xtok), number=N)
     student_time = timeit.timeit(timeit_f_wrap(student, xtok), number=N)
     print(f"Teacher time: {teacher_time:.2f} \n\tvs student time: {student_time:.2f}  ({N} runs) \n\ton an input of length {len(x.split())}")
+
+
+def try_masked_cut_vs_actual_cut():
+    teacher, tok = get_bert()
+    mask_student = make_lil_bert_cut(teacher, dim=252)
+    cut_student = make_lil_bert_actual_cut(teacher, dim=252, vanilla=False)
+    mask_student.eval()
+    cut_student.eval()
+
+    x = "lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies lil bert went for a walk and found roberta. Later they married and had lots of ernies"
+    # x = "lil bert went for a walk and found roberta. Later they married and had lots of ernies"
+    # x = "lil bert went for a walk"
+    xtok = torch.tensor(tok.encode(x)).unsqueeze(0)
+
+    mask_y = mask_student(xtok)
+    cut_y = cut_student(xtok)
+
+    # print(mask_y)
+    # print(cut_y)
+    print(mask_y[0][:, :, :252] - cut_y[0])
+    assert(torch.allclose(mask_y[0][:, :, :252], cut_y[0], atol=1e-6))
+    assert(torch.allclose(mask_y[0][:, :, 252:], torch.zeros_like(mask_y[0][:, :, 252:])))
+
+
 
 
 def try_bert_distill_model():
@@ -695,6 +775,8 @@ if __name__ == '__main__':
     # try_reduce_project_dim_selfattnlayer()
     # sys.exit()
     # try_prune_linear()
+    try_masked_cut_vs_actual_cut()
+    sys.exit()
     try_timeit_lil_bert_cut()
     sys.exit()
     try_linear_pruner()
