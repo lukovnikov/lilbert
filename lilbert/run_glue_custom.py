@@ -478,16 +478,16 @@ if __name__ == '__main__':
         prune_frac_emb=0.5)
 
     # Diff in args
-    args.call_wandb = True
+    args.call_wandb = False
     args.mode = 'loss_in_model'
 
     args.method = 'cut'
-    args.loss_type = 'distill' #attention
+    args.loss_type = 'attention' #distill
     args.only_teacher = False
     args.save = False
     args.alpha = 0.5
-    args.data_dir = 'dataset/SSTB'
-    args.task_name = 'SSTB'
+    args.data_dir = 'dataset/MRPC'
+    args.task_name = 'MRPC'
 
     # various experiment varioation
 
@@ -540,6 +540,9 @@ if __name__ == '__main__':
         # Lilbert with attention distillation - 2a
         _, tok = lilbert.get_bert()
         teacher = torch.load(args.output_dir + args.task_name.lower() + args.output_name)
+
+        # Add num classes to teacher for downstream sanity
+        teacher.numclasses = args.numclasses
 
         # Make Lilbert.
         if args.method == 'prune':  # 2
