@@ -75,10 +75,65 @@ def reduce_embedding_dim(x:torch.nn.Embedding, dim:int):
     return x
 
 
+class DistillLoss(torch.nn.Module):
+    """ Distillation (KD) loss for sequences of categorical distributions """
+    def __init__(self, reduction="mean", temperature=1., mixture=0.5, **kw):
+        """
+        :param ignore_index:    gold ids whose time steps will be ignored
+        :param temperature:     softmax temperature (!: will not be applied if soft_gold_mode is not "logits")
+        :param mixture:         mixing portion of soft and hard gold (1 => only soft kl, 0 => only hard ce)
+        :param kw:
+        """
+        super(DistillLoss, self).__init__(**kw)
+        self.reduction = reduction
+        self.temperature = temperature
+        self.mixture = mixture
+        self.sm = torch.nn.Softmax(-1)
+        self.logsm = torch.nn.LogSoftmax(-1)
+        self.hardCE = torch.nn.CrossEntropyLoss(reduction="none")
+        self.kl = torch.nn.KLDivLoss(reduction="none")
+
+    def forward(self, probs, gold):
+        """
+        :param probs:       (batsize, ..., numsym) logit predictions
+        :param gold:        tuple of (batsize, ..., numsym) soft gold logits and (batsize, ...) ints for hard gold
+        """
+        softgold, hardgold = gold
+        t = self.temperature
+        mix = self.mixture
+
+        # hard gold - normal CE, !!: probs are logits
+        hard_ce = 0
+        if mix < 1:
+            hard_ce = self.hardCE(probs, hardgold)
+
+        # soft gold
+        kl_div = 0
+        if mix > 0:
+            _log_probs = self.logsm(probs / t)
+            if torch.any(probs == -np.infty).item() == 1:
+                softgold = softgold + torch.log((probs != -np.infty).float())
+            _softgold = self.sm(softgold / t)
+            kl_divs = self.kl(_log_probs, _softgold)
+            # kl_divs = inf2zero(kl_divs)
+            kl_div = kl_divs.sum(-1)
+
+        # mix
+        loss = mix * kl_div + (1 - mix) * hard_ce        # (batsize, seqlen)
+
+        ret = loss.sum()
+        if self.reduction in ["elementwise_mean", "mean"]:
+            ret = loss.mean()
+        elif self.reduction == "none":
+            ret = loss
+        return ret
+
+
 class BertDistillLoss(torch.nn.Module):
-    def __init__(self, alpha=.5, reduction="mean", regression=False, **kw):
+    def __init__(self, alpha=.5, reduction="mean", regression=False, mode="l2", temperature:float=1., **kw):
         """
         :param alpha:       mixing between hard CE and distill. alpha == 1 => only hard CE loss
+        :param mode:        "l2" or "kl"
         :param kw:
         """
         super(BertDistillLoss, self).__init__(**kw)
@@ -86,8 +141,14 @@ class BertDistillLoss(torch.nn.Module):
         self.reduction = reduction
         assert(self.reduction == "mean")
         self.regression = regression
+        self.mode = mode
         if not regression:
-            self.loss = torch.nn.CrossEntropyLoss(reduction=reduction)
+            if mode == "l2":
+                self.loss = torch.nn.CrossEntropyLoss(reduction=reduction)
+            elif mode == "kl":
+                self.loss = DistillLoss(reduction=reduction, temperature=temperature, mixture=1 - alpha)
+            else:
+                raise Exception(f"unknown mode: {mode}")
         else:
             self.loss = torch.nn.MSELoss(reduction=reduction)
             print("WARNING: if regression, output distillation is not done.")
@@ -103,12 +164,15 @@ class BertDistillLoss(torch.nn.Module):
             loss = self.loss(logits.view(-1), targets.view(-1))
             ret = loss
         else:
-            loss = self.loss(logits, targets)
-            distance = 0
-            if self.alpha < 1:
-                distance = (logits - targetlogits).norm(2, 1) ** 2
-                distance = distance.mean() if self.reduction == "mean" else distance.sum()
-            ret = loss * self.alpha + (1 - self.alpha) * distance
+            if self.mode == "l2":
+                loss = self.loss(logits, targets)
+                distance = 0
+                if self.alpha < 1:
+                    distance = (logits - targetlogits).norm(2, 1) ** 2
+                    distance = distance.mean() if self.reduction == "mean" else distance.sum()
+                ret = loss * self.alpha + (1 - self.alpha) * distance
+            elif self.mode == "kl":
+                ret = self.loss(logits, (targetlogits, targets))
         return ret
 
 
@@ -123,10 +187,37 @@ def try_classification_distill_loss():
     print(logits.grad)
 
 
+def try_classification_distill_loss_kl():
+    logits = param(torch.rand(5, 4))
+    targets = torch.randint(0, 4, (5,))
+    targetlogits = param(torch.rand(5, 4))
+    loss = BertDistillLoss(alpha=.5, mode="kl")
+    l = loss(logits, targets, targetlogits)
+    print(l)
+    l.backward()
+    print(logits.grad)
+
+
+def nan2zero(x):
+    nanmask = torch.isnan(x)
+    if torch.any(nanmask).item() == 1:
+        _x_cpy = torch.zeros_like(x)
+        _xv = x.masked_select(~nanmask)
+        _x_cpy.masked_scatter_(~nanmask, _xv)
+        return _x_cpy
+    return x
+
+
 class AttentionDistillLoss(torch.nn.Module):
-    def __init__(self, reduction="mean", **kw):
+    def __init__(self, reduction="mean", mode="l2", temperature:float=1., **kw):
         super(AttentionDistillLoss, self).__init__(**kw)
+        self.mode = mode
+        self.temperature = temperature
         self.reduction = reduction
+        if mode == "kl":
+            self.kl = torch.nn.KLDivLoss(reduction="none")
+            self.logsm = torch.nn.LogSoftmax(-1)
+            self.sm = torch.nn.Softmax(-1)
 
     def forward(self, student_attention_logits, teacher_attention_logits, attention_mask):
         """
@@ -135,29 +226,61 @@ class AttentionDistillLoss(torch.nn.Module):
         :param attention_mask:              (batsize, seqlen)
         :return:
         """
-        att_mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)
-        att_mask = att_mask.unsqueeze(1).unsqueeze(2)
-        distances = (teacher_attention_logits - student_attention_logits)
-        distances = distances * att_mask.float()
-        distance = distances.norm(2, -1) ** 2 #(distances ** 2).sum(-1))     # (batsize, numl, numh, seqlen)
-        # average over sequence elements in example
-        att_mask = att_mask.sum(-1) > 0
-        distance = distance.sum(-1) / att_mask.float().sum(-1)
-        # average over heads and layers
-        distance = distance.mean(-1).mean(-1)
-        # distance = distances.norm(2, -1)
-        # average over examples
-        distance = distance.mean() if self.reduction == "mean" else distance.sum()
+        if self.mode == "l2":
+            att_mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)
+            att_mask = att_mask.unsqueeze(1).unsqueeze(2)
+            distances = (teacher_attention_logits - student_attention_logits)
+            distances = distances * att_mask.float()
+            distance = distances.norm(2, -1) ** 2 #(distances ** 2).sum(-1))     # (batsize, numl, numh, seqlen)
+            # average over sequence elements in example
+            att_mask = att_mask.sum(-1) > 0
+            distance = distance.sum(-1) / att_mask.float().sum(-1)
+            # average over heads and layers
+            distance = distance.mean(-1).mean(-1)
+            # distance = distances.norm(2, -1)
+            # average over examples
+            distance = distance.mean() if self.reduction == "mean" else distance.sum()
+        elif self.mode == "kl":
+            att_mask = attention_mask.unsqueeze(1) #* attention_mask.unsqueeze(2)
+            att_mask = att_mask.unsqueeze(1).unsqueeze(2)
+            _log_probs = self.logsm(student_attention_logits + torch.log(att_mask.float()) / self.temperature)
+            _softgold = self.sm(teacher_attention_logits + torch.log(att_mask.float()) / self.temperature)
+            kl_divs = self.kl(_log_probs, _softgold)
+            kl_divs = kl_divs * attention_mask.unsqueeze(1).unsqueeze(2).unsqueeze(-1).float()
+            # kl_divs = inf2zero(kl_divs)
+            kl_div = kl_divs.sum(-1)
+            distance = kl_div.mean() if self.reduction == "mean" else kl_div.sum()
         return distance
 
 
 def try_attention_distill_loss():
     sa_logits = param(torch.rand(5, 12, 12, 6, 6))
     ta_logits = param(torch.rand(5, 12, 12, 6, 6))
+    att_mask = torch.tensor([[1, 1, 1, 0, 0, 0],
+                             [1, 1, 1, 1, 1, 1],
+                             [1, 1, 1, 0, 0, 0],
+                             [1, 0, 0, 0, 0, 0],
+                             [1, 1, 1, 0, 0, 0],])
     loss = AttentionDistillLoss()
-    l = loss(sa_logits, ta_logits)
+    l = loss(sa_logits, ta_logits, att_mask)
     print(l)
     l.backward()
+    print(sa_logits.grad.size(), sa_logits.grad.norm())
+
+
+def try_attention_distill_loss_kl():
+    sa_logits = param(torch.rand(5, 12, 12, 6, 6))
+    ta_logits = param(torch.rand(5, 12, 12, 6, 6))
+    att_mask = torch.tensor([[1, 1, 1, 0, 0, 0],
+                             [1, 1, 1, 1, 1, 1],
+                             [1, 1, 1, 0, 0, 0],
+                             [1, 0, 0, 0, 0, 0],
+                             [1, 1, 1, 0, 0, 0],])
+    loss = AttentionDistillLoss(mode="kl")
+    l = loss(sa_logits, ta_logits, att_mask)
+    print(l)
+    l.backward()
+    print(sa_logits.grad)
     print(sa_logits.grad.size(), sa_logits.grad.norm())
 
 
@@ -203,7 +326,7 @@ class BertDistillModel(torch.nn.Module):
     Model for normal BERT distillation onto a lil BERT
     """
 
-    def __init__(self, teacher, student, alpha=.5, **kw):
+    def __init__(self, teacher, student, alpha=.5, mode="l2", temperature:float=1., **kw):
         """
         :param teacher: normal BERT with classifier on top
         :param student: lil BERT with clasifier on top
@@ -211,7 +334,7 @@ class BertDistillModel(torch.nn.Module):
         """
         super(BertDistillModel, self).__init__(**kw)
         self.teacher, self.student = teacher, student
-        self.loss = BertDistillLoss(alpha=alpha, regression=self.teacher.numclasses == 1)
+        self.loss = BertDistillLoss(alpha=alpha, regression=self.teacher.numclasses == 1, mode=mode, temperature=temperature)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, position_ids=None, head_mask=None,
                 targets=None):
@@ -238,10 +361,10 @@ class BertDistillModel(torch.nn.Module):
 
 
 class BertDistillWithAttentionModel(BertDistillModel):
-    def __init__(self, teacher, student, alpha=.5, beta=1., **kw):
-        super(BertDistillWithAttentionModel, self).__init__(teacher, student, alpha=alpha, **kw)
+    def __init__(self, teacher, student, alpha=.5, beta=1., mode="l2", temperature:float=1., **kw):
+        super(BertDistillWithAttentionModel, self).__init__(teacher, student, alpha=alpha, mode=mode, temperature=temperature, **kw)
         self.beta = beta
-        self.att_loss = AttentionDistillLoss()
+        self.att_loss = AttentionDistillLoss(mode=mode, temperature=temperature)
 
     def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask):
         mainl = super(BertDistillWithAttentionModel, self).get_loss(g, pred, teacher_pred, sa_logits, ta_logits, att_mask)
@@ -739,20 +862,20 @@ def try_bert_distill_model_with_attention():
     # student_ = make_lil_bert(teacher_, dim=420, vanilla=False)
     teacher = BertClassifier(teacher_, 768, 5)
     # student = BertClassifier(student_, 420, 5)
-    student = make_lil_bert(teacher, 420)
+    student = make_lil_bert(teacher, 420, vanilla=False)
     student_ = student.bert
 
     print(student.bert.embeddings.word_embeddings.weight.size())
     print(student.bert.encoder.layer[5])
     print(student.bert.encoder.layer[5].attention.self.query.weight.size())
 
-    m = BertDistillWithAttentionModel(teacher, student, alpha=.5, beta=.5)
+    m = BertDistillWithAttentionModel(teacher, student, alpha=.5, beta=.5, mode="kl")
 
     xs = ["lil bert went for a walk", "he found ernie [PAD] [PAD] [PAD]"]
     xtoks = [torch.tensor(tok.encode(x)).unsqueeze(0) for x in xs]
     y = m(torch.cat(xtoks, 0), targets=torch.randint(0, 4, (2,)))
 
-    teacher_wordembs = teacher_.embeddings.word_embeddings.weight.detach().numpy().copy()+0
+    teacher_wordembs = teacher_.embeddings.word_embeddings.weight.detach().numpy().copy() + 0
     student_wordembs = student_.embeddings.word_embeddings.weight.detach().numpy().copy() + 0
     print(teacher_wordembs[1037, :5])
     print(student_wordembs[1037, :5])
@@ -817,12 +940,12 @@ if __name__ == '__main__':
     # sys.exit()
     # try_prune_lil_bert()
     # sys.exit()
-    # try_bert_distill_model_with_attention()
-    # sys.exit()
-    try_bert_distill_model()
+    try_bert_distill_model_with_attention()
     sys.exit()
-    try_classification_distill_loss()
-    try_attention_distill_loss()
+    # try_bert_distill_model()
+    # sys.exit()
+    # try_classification_distill_loss_kl()
+    try_attention_distill_loss_kl()
     sys.exit()
 
     bert, bert_tok = get_bert()
