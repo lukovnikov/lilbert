@@ -361,10 +361,11 @@ class BertDistillModel(torch.nn.Module):
 
 
 class BertDistillWithAttentionModel(BertDistillModel):
-    def __init__(self, teacher, student, alpha=.5, beta=1., mode="l2", temperature:float=1., **kw):
+    def __init__(self, teacher, student, alpha=.5, beta=1.,
+                 mode="l2", temperature:float=1., attention_temperature:float=1., **kw):
         super(BertDistillWithAttentionModel, self).__init__(teacher, student, alpha=alpha, mode=mode, temperature=temperature, **kw)
         self.beta = beta
-        self.att_loss = AttentionDistillLoss(mode=mode, temperature=temperature)
+        self.att_loss = AttentionDistillLoss(mode=mode, temperature=attention_temperature)
 
     def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask):
         mainl = super(BertDistillWithAttentionModel, self).get_loss(g, pred, teacher_pred, sa_logits, ta_logits, att_mask)
