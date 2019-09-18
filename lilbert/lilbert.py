@@ -241,7 +241,7 @@ class AttentionDistillLoss(torch.nn.Module):
             # average over examples
             distance = distance.mean() if self.reduction == "mean" else distance.sum()
         elif self.mode == "kl":
-            att_mask = attention_mask.unsqueeze(1) #* attention_mask.unsqueeze(2)
+            att_mask = attention_mask.unsqueeze(1)
             att_mask = att_mask.unsqueeze(1).unsqueeze(2)
             _log_probs = self.logsm(student_attention_logits + torch.log(att_mask.float()) / self.temperature)
             _softgold = self.sm(teacher_attention_logits + torch.log(att_mask.float()) / self.temperature)
