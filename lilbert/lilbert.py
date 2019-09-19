@@ -338,7 +338,8 @@ class BertDistillModel(torch.nn.Module):
         """
         super(BertDistillModel, self).__init__(**kw)
         self.teacher, self.student = teacher, student
-        self.loss = BertDistillLoss(alpha=alpha, regression=self.teacher.numclasses == 1, mode=mode, temperature=temperature)
+        self.loss = BertDistillLoss(alpha=alpha, regression=self.teacher.numclasses == 1,
+                                    mode=mode, temperature=temperature)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, position_ids=None, head_mask=None,
                 targets=None, custom_alpha=None):
@@ -357,11 +358,14 @@ class BertDistillModel(torch.nn.Module):
         student_logits, student_attention_logits = self.student(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, position_ids=position_ids)
         student_attention_logits = torch.stack(student_attention_logits, 1)
         # compute loss
-        loss = self.get_loss(targets, student_logits, teacher_logits, 
-                             student_attention_logits, teacher_attention_logits, attention_mask, custom_alpha)
+        loss = self.get_loss(g=targets, pred= student_logits, teacher_pred=teacher_logits,
+                             sa_logits = student_attention_logits,
+                             ta_logits= teacher_attention_logits,
+                             att_mask= attention_mask,
+                             custom_alpha= custom_alpha)
         return loss, student_logits
 
-    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask, custom_alpha):
+    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask, custom_alpha='default'):
         return self.loss(pred, g, teacher_pred, custom_alpha)
 
 
@@ -372,8 +376,9 @@ class BertDistillWithAttentionModel(BertDistillModel):
         self.beta = beta
         self.att_loss = AttentionDistillLoss(mode=mode, temperature=attention_temperature)
 
-    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask):
-        mainl = super(BertDistillWithAttentionModel, self).get_loss(g, pred, teacher_pred, sa_logits, ta_logits, att_mask)
+    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask, custom_alpha):
+        mainl = super(BertDistillWithAttentionModel, self).get_loss(g, pred, teacher_pred, sa_logits,
+                                                                    ta_logits, att_mask, custom_alpha)
         attl = self.att_loss(sa_logits, ta_logits, att_mask)
         ret = mainl + self.beta * attl
         return ret
