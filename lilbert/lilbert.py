@@ -140,7 +140,10 @@ class AttentionDistillLoss(torch.nn.Module):
         distances = (teacher_attention_logits - student_attention_logits)
 
         # Throw in a ratio here.
-        distance_ratio = torch.nn.Softmax(dim=0)(torch.arange(0, 12).float()).unsqueeze(1).unsqueeze(1).unsqueeze(1)
+        distance_ratio =  torch.tensor([1,1,1,1,1,0.5,0.5,0,0,0,0,0], dtype=torch.float,
+                                       device=student_attention_logits.device)
+        distance_ratio = distance_ratio.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+        # distance_ratio = torch.nn.Softmax(dim=0)(torch.arange(0, 12, device=student_attention_logits.device).float()).unsqueeze(1).unsqueeze(1).unsqueeze(1)
         distances = torch.mul(distances, distance_ratio)
 
         distances = distances * att_mask.float()
