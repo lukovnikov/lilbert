@@ -22,6 +22,7 @@ from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
 
 # Local imports
 import lilbert
+from typing import Union, Any, Tuple, List
 from utils import goodies as gd
 from utils_glue import (compute_metrics, convert_examples_to_features,
                         output_modes, processors, GLUE_TASKS_NUM_LABELS)
@@ -37,18 +38,107 @@ def set_seed(args):
         torch.cuda.manual_seed_all(args.seed)
 
 
+class ProbIter:
+
+    def __init__(self, length, method='lin'):
+        # TODO: implement next with a bunch of asserts.
+        # TODO: Generalize for multiple datasets at a go.
+        self.len, self.method = length, method
+        if self.method == 'lin':
+            data_a = np.arange(0, self.len+1, 1) / float(self.len)
+            data_b = np.arange(self.len, -1, -1) / float(self.len)
+            self.data = zip(data_a, data_b)
+
+    def __len__(self):
+        return self.len
+
+    def __iter__(self):
+        # If logic needed in _next_, return self, and write __next__(self)
+        self.i = 0
+        return self
+
+    def __next__(self):
+        return self.data.__next__()
+
+
+class InterpolatingIter:
+
+    def __init__(self, data_a: Tuple[np.ndarray], data_b: Tuple[np.ndarray], bs: int = 32, prob_method: str = 'lin' ):
+        """
+            Take two datasets, shuffle them. Store them.
+            Find Length of this iter
+            Make a prob iter correspondingly
+
+        :param data_a:
+        :param data_b:
+
+        """
+        self.bs = bs
+        self.data = [data_a, data_b]
+        self.data_nm = [0, 1]
+        # self.data = [(index, self._shuffle_(d)) for index, d in enumerate(self.data)]
+        self._shuffle_()
+        self.len = sum(len(d[0])//self.bs  - (1 if len(d[0]) % self.bs else 0) for d in self.data)
+        self.probs = ProbIter(self.len, prob_method)
+
+    def _shuffle_(self):
+        for i in range(len(self.data)):
+            data = self.data[i]
+            index = np.arange(len(data[0]))
+            np.random.shuffle(index)
+            self.data[i] = tuple([datum[index] for datum in data])
+
+    def __len__(self) -> int:
+        return self.len
+
+    def __iter__(self):
+        self.i, self.iter = [0 for _ in self.data], 0
+        return self
+
+    def reset(self):
+        self.i, self.iter = [0 for _ in self.data], 0
+        self._shuffle_()
+
+    def _return_data_(self, src, pos):
+        """ Actual Data pulling happens here """
+
+        if pos+self.bs < len(src[0]):           # No Edge Case
+            data_chunk = [datum[pos:pos+self.bs] for datum in src]
+            pos += self.bs
+        else:                                   # Edge Case
+            data_chunk = [datum[pos:] for datum in src]
+            pos = 0
+        return data_chunk, pos
+
+
+    def __next__(self) -> (int, Any):
+
+        # Length check
+        if self.iter >= self.len:
+            raise StopIteration
+        else:
+            self.iter += 1
+
+        index= np.random.choice(self.data_nm, p=self.probs.__next__())
+        data_src = self.data[index]
+        data_chunk, pos = self._return_data_(data_src, self.i[index])
+        self.i[index] = pos
+
+        return index, data_chunk
+
+
 def train(args: Union[dict, gd.FancyDict], train_dataset, train_dataset_aux, model, tokenizer):
     """ Train the model """
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
 
-    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    # train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+    # train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    #
+    # train_sampler_aux = RandomSampler(train_dataset_aux) if args.local_rank == -1 else DistributedSampler(train_dataset_aux)
+    # train_dataloader_aux = DataLoader(train_dataset_aux, sampler=train_sampler_aux, batch_size=args.train_batch_size)
 
-
-    train_sampler_aux = RandomSampler(train_dataset_aux) if args.local_rank == -1 else DistributedSampler(train_dataset_aux)
-    train_dataloader_aux = DataLoader(train_dataset_aux, sampler=train_sampler_aux, batch_size=args.train_batch_size)
-
+    train_dataloader = InterpolatingIter(train_dataset.tensors, train_dataset_aux.tensors, bs=args.per_gpu_train_batch_size, prob_method='lin')
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -101,22 +191,29 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, train_dataset_aux, mod
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     previous_accuracy, previous_accuracy_aux = 0, 0
 
+    # interleave_iter = InterpolatingIter()
+
     for i in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-        epoch_iterator_aux = tqdm(train_dataloader_aux, desc="Iteration", disable=args.local_rank not in [-1, 0])
+        # epoch_iterator_aux = tqdm(train_dataloader_aux, desc="Iteration", disable=args.local_rank not in [-1, 0])
 
-        for step, (batch, batch_aux) in enumerate(zip(epoch_iterator, epoch_iterator_aux)):
+        for step, (datasetnm, batch) in enumerate(epoch_iterator):
 
-            step_aux = step
 
-            logging_loss_aux, global_step_aux, tr_loss_aux  = \
-                    forward_pass(args, model, batch_aux, tr_loss_aux, global_step_aux, step_aux, scheduler, optimizer,
-                                       previous_accuracy_aux, logging_loss_aux
-                             , tokenizer, 1.0, do_evaluate=False)
+            if datasetnm == 0:
+                logging_loss, global_step, tr_loss = forward_pass(args, model, batch, tr_loss, global_step, step,
+                                                                  scheduler, optimizer, previous_accuracy, logging_loss
+                                                                  , tokenizer, 0.5, do_evaluate=True)
+            elif datasetnm == 1:
+                logging_loss_aux, global_step_aux, tr_loss_aux  = \
+                        forward_pass(args, model, batch, tr_loss_aux, global_step_aux, step, scheduler, optimizer,
+                                           previous_accuracy_aux, logging_loss_aux
+                                 , tokenizer, 1.0, do_evaluate=False)
 
-            logging_loss, global_step, tr_loss = forward_pass(args, model, batch, tr_loss, global_step, step,
-                                                              scheduler, optimizer, previous_accuracy, logging_loss
-                         , tokenizer, 0.5, do_evaluate=True)
+            else:
+                raise IOError
+
+        train_dataloader.reset()
 
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
@@ -344,7 +441,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     return results
 
 
-def load_and_cache_examples(args, task, tokenizer, evaluate=False):
+def load_and_cache_examples(args, task, tokenizer, evaluate=False, trim=1.0):
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
 
@@ -389,7 +486,13 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False):
     elif output_mode == "regression":
         all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.float)
 
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    if trim < 1:
+        index = np.random.choice(np.arange(len(all_input_ids)), size=int(len(all_input_ids)*trim))
+        dataset = TensorDataset(
+            all_input_ids[index], all_input_mask[index], all_segment_ids[index], all_label_ids[index]
+        )
+    else:
+        dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
     return dataset
 
 
@@ -430,7 +533,7 @@ def main(args, model, tokenizer):
 
         args.task_name = 'qqp'
         args.data_dir = 'dataset/QQP'
-        train_dataset_aux = load_and_cache_examples(args, 'qqp', tokenizer, evaluate=False)
+        train_dataset_aux = load_and_cache_examples(args, 'qqp', tokenizer, evaluate=False, trim=0.03)
 
         args.data_dir = dd
         args.task_name = d
@@ -498,7 +601,7 @@ if __name__ == '__main__':
         logging_loss_steps=10,
         save_steps=1000,
         eval_all_checkpoints=True,
-        no_cuda=False,
+        no_cuda=True,
         overwrite_output_dir=True,
         overwrite_cache=True,
         seed=42,
@@ -514,7 +617,7 @@ if __name__ == '__main__':
         prune_frac_emb=0.5)
 
     # Diff in args
-    args.call_wandb = True
+    args.call_wandb = False
     args.mode = 'loss_in_model'
 
     args.method = 'cut'
@@ -527,6 +630,7 @@ if __name__ == '__main__':
 
     # various experiment varioation
 
+    # TODO: REPLACE!!!!
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", help="increase output verbosity")
     cmd_args = parser.parse_args()
@@ -575,7 +679,8 @@ if __name__ == '__main__':
 
         # Lilbert with attention distillation - 2a
         _, tok = lilbert.get_bert()
-        teacher = torch.load(args.output_dir + args.task_name.lower() + args.output_name)
+        device = torch.device('cpu')
+        teacher = torch.load(args.output_dir + args.task_name.lower() + args.output_name, map_location=device)
 
         # Make Lilbert.
         if args.method == 'prune':  # 2
