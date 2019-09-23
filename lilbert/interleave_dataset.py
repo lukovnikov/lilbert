@@ -138,7 +138,8 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, train_dataset_aux, mod
     # train_sampler_aux = RandomSampler(train_dataset_aux) if args.local_rank == -1 else DistributedSampler(train_dataset_aux)
     # train_dataloader_aux = DataLoader(train_dataset_aux, sampler=train_sampler_aux, batch_size=args.train_batch_size)
 
-    train_dataloader = InterpolatingIter(train_dataset.tensors, train_dataset_aux.tensors, bs=args.per_gpu_train_batch_size, prob_method='lin')
+    train_dataloader = InterpolatingIter(train_dataset.tensors, train_dataset_aux.tensors,
+                                         bs=args.per_gpu_train_batch_size, prob_method='lin')
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -157,7 +158,7 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, train_dataset_aux, mod
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total*2)
+    scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
 
     if args.fp16:
         try:
@@ -594,7 +595,7 @@ if __name__ == '__main__':
         weight_decay=0.0,
         adam_epsilon=1e-8,
         max_grad_norm=1.0,
-        num_train_epochs=3.0,
+        num_train_epochs=6.0,
         max_steps=-1,
         warmup_steps=0,
         logging_steps=1000,
