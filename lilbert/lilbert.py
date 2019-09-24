@@ -826,6 +826,19 @@ def try_masked_cut_vs_actual_cut():
     assert(torch.allclose(mask_y[0][:, :, :252], cut_y[0], atol=1e-6))
     assert(torch.allclose(mask_y[0][:, :, 252:], torch.zeros_like(mask_y[0][:, :, 252:])))
 
+    l_cut = cut_y[0].sum()
+    l_cut.backward()
+
+    l_mask = mask_y[0].sum()
+    l_mask.backward()
+
+    print(mask_student.embeddings.word_embeddings.weight.grad[1012])
+    print(mask_student.embeddings.word_embeddings.weight.grad[1012])
+    print(mask_student.embeddings.word_embeddings.weight.grad[1012])
+
+
+
+
 
 def try_masked_cut_vs_actual_cut_cls():
     teacher, tok = get_bert()
@@ -939,8 +952,8 @@ if __name__ == '__main__':
     # sys.exit()
     # try_prune_linear()
     # try_masked_cut_vs_actual_cut_cls()
-    # try_masked_cut_vs_actual_cut()
-    # sys.exit()
+    try_masked_cut_vs_actual_cut()
+    sys.exit()
     # try_timeit_lil_bert_cut()
     # sys.exit()
     # try_linear_pruner()
