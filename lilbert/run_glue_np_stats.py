@@ -442,7 +442,7 @@ def main():
 
     bert, tokenizer = lilbert.get_bert("bert-base-uncased")
     bertc = lilbert.BertClassifier(bert, 768, num_labels)
-    bertc = lilbert.make_lil_bert_actual(bertc, 420, vanilla=False)
+    bertc = lilbert.make_lil_bert_cut(bertc, 420, vanilla=False)
     bertm = lilbert.BertClassifierModel(bertc)
 
     if args.finetune_last > -1:
