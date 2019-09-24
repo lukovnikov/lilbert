@@ -22,6 +22,7 @@ from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
 
 # Local imports
 import lilbert
+from typing import Union, Any, Tuple, List
 from utils import goodies as gd
 from utils_glue import (compute_metrics, convert_examples_to_features,
                         output_modes, processors, GLUE_TASKS_NUM_LABELS)
@@ -37,12 +38,108 @@ def set_seed(args):
         torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
+class ProbIter:
+
+    def __init__(self, length, method='lin'):
+        # TODO: implement next with a bunch of asserts.
+        # TODO: Generalize for multiple datasets at a go.
+        self.len, self.method = length, method
+        if self.method == 'lin':
+            data_a = np.arange(0, self.len+1, 1) / float(self.len)
+            data_b = np.arange(self.len, -1, -1) / float(self.len)
+            self.data = zip(data_a, data_b)
+
+    def __len__(self):
+        return self.len
+
+    def __iter__(self):
+        # If logic needed in _next_, return self, and write __next__(self)
+        self.i = 0
+        return self
+
+    def __next__(self):
+        return self.data.__next__()
+
+
+class InterpolatingIter:
+
+    def __init__(self, data_a: Tuple[np.ndarray], data_b: Tuple[np.ndarray], bs: int = 32, prob_method: str = 'lin' ):
+        """
+            Take two datasets, shuffle them. Store them.
+            Find Length of this iter
+            Make a prob iter correspondingly
+
+        :param data_a:
+        :param data_b:
+
+        """
+        self.bs = bs
+        self.data = [data_a, data_b]
+        self.data_nm = [0, 1]
+        # self.data = [(index, self._shuffle_(d)) for index, d in enumerate(self.data)]
+        self._shuffle_()
+        self.len = sum(len(d[0])//self.bs  - (1 if len(d[0]) % self.bs else 0) for d in self.data)
+        self.probs = ProbIter(self.len, prob_method)
+
+    def _shuffle_(self):
+        for i in range(len(self.data)):
+            data = self.data[i]
+            index = np.arange(len(data[0]))
+            np.random.shuffle(index)
+            self.data[i] = tuple([datum[index] for datum in data])
+
+    def __len__(self) -> int:
+        return self.len
+
+    def __iter__(self):
+        self.i, self.iter = [0 for _ in self.data], 0
+        return self
+
+    def reset(self):
+        self.i, self.iter = [0 for _ in self.data], 0
+        self._shuffle_()
+
+    def _return_data_(self, src, pos):
+        """ Actual Data pulling happens here """
+
+        if pos+self.bs < len(src[0]):           # No Edge Case
+            data_chunk = [datum[pos:pos+self.bs] for datum in src]
+            pos += self.bs
+        else:                                   # Edge Case
+            data_chunk = [datum[pos:] for datum in src]
+            pos = 0
+        return data_chunk, pos
+
+
+    def __next__(self) -> (int, Any):
+
+        # Length check
+        if self.iter >= self.len:
+            raise StopIteration
+        else:
+            self.iter += 1
+
+        index= np.random.choice(self.data_nm, p=self.probs.__next__())
+        data_src = self.data[index]
+        data_chunk, pos = self._return_data_(data_src, self.i[index])
+        self.i[index] = pos
+
+        return index, data_chunk
+
+
+def train(args: Union[dict, gd.FancyDict], train_dataset, train_dataset_aux, model, tokenizer):
     """ Train the model """
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
+    # train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+    # train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    #
+    # train_sampler_aux = RandomSampler(train_dataset_aux) if args.local_rank == -1 else DistributedSampler(train_dataset_aux)
+    # train_dataloader_aux = DataLoader(train_dataset_aux, sampler=train_sampler_aux, batch_size=args.train_batch_size)
+
+    train_dataloader = InterpolatingIter(train_dataset.tensors, train_dataset_aux.tensors,
+                                         bs=args.per_gpu_train_batch_size, prob_method='lin')
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -82,140 +179,43 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
     logger.info("  Total optimization steps = %d", t_total)
 
     global_step = 0
+    global_step_aux = 0
+
     tr_loss, logging_loss = 0.0, 0.0
+    tr_loss_aux, logging_loss_aux = 0.0, 0.0
+
     model.zero_grad()
 
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
+
+
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
-    previous_accuracy = 0
+    previous_accuracy, previous_accuracy_aux = 0, 0
 
-    for _ in train_iterator:
+    # interleave_iter = InterpolatingIter()
+
+    for i in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-        for step, batch in enumerate(epoch_iterator):
-            model.train()
-            batch = tuple(t.to(args.device) for t in batch)
-            if args.mode == 'loss_in_train_loop':
-                inputs = {'input_ids': batch[0],
-                          'attention_mask': batch[1],
-                          'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None}
+        # epoch_iterator_aux = tqdm(train_dataloader_aux, desc="Iteration", disable=args.local_rank not in [-1, 0])
 
-                outputs = model(**inputs)
-                logits = outputs[0]
-                inputs['labels'] = batch[3]
+        for step, (datasetnm, batch) in enumerate(epoch_iterator):
 
-                # outputs = (logits,) + outputs[2:]  # add hidden hiddenstates and attention if they are here
 
-                # Calculating loss
-                if inputs['labels'] is not None:
-                    if args.num_labels == 1:
-                        #  We are doing regression
-                        loss_fct = MSELoss()
-                        loss = loss_fct(logits.view(-1), inputs['labels'].view(-1))
-                    else:
-                        loss_fct = CrossEntropyLoss()
-                        loss = loss_fct(logits.view(-1, args.num_labels), inputs['labels'].view(-1))
-                    outputs = (loss,) + outputs
-
-                loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
-
-            elif args.mode == 'loss_in_model':
-                inputs = {'input_ids': batch[0],
-                          'attention_mask': batch[1],
-                          'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
-                          'targets': batch[3]}
-
-                loss, logits = model(**inputs)
-                inputs['labels'] = batch[3]
+            if datasetnm == 0:
+                logging_loss, global_step, tr_loss = forward_pass(args, model, batch, tr_loss, global_step, step,
+                                                                  scheduler, optimizer, previous_accuracy, logging_loss
+                                                                  , tokenizer, 0.5, do_evaluate=True)
+            elif datasetnm == 1:
+                logging_loss_aux, global_step_aux, tr_loss_aux  = \
+                        forward_pass(args, model, batch, tr_loss_aux, global_step_aux, step, scheduler, optimizer,
+                                           previous_accuracy_aux, logging_loss_aux
+                                 , tokenizer, 1.0, do_evaluate=False)
 
             else:
-                print(f"mode not recognized. mode found {args.mode}")
                 raise IOError
 
-            if args.n_gpu > 1:
-                loss = loss.mean()  # mean() to average on multi-gpu parallel training
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
+        train_dataloader.reset()
 
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-            iter_loss = loss.item()
-            tr_loss += iter_loss
-
-            # logging loss for wandb
-            if global_step % args.logging_loss_steps == 0 and args.call_wandb:
-                # log the loss here
-                wandb.log({'iter_loss': iter_loss})
-
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                scheduler.step()  # Update learning rate schedule
-                optimizer.step()
-                if args.pruner:
-                    args.pruner.step()
-                model.zero_grad()
-                global_step += 1
-
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    # Log metrics
-                    if args.local_rank == -1 and args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
-                        results = evaluate(args, model, tokenizer)
-
-                        if args.call_wandb:
-                            wandb.log({k: v for k, v in results.items()})
-
-                        for k,v in results.items():
-                            if k == 'acc':
-                                key = 'acc'
-                            elif k == 'mcc':
-                                key = 'mcc'
-                            elif k == 'corr':
-                                key = 'corr'
-                            elif k == 'f1':
-                                key = 'f1'
-                            elif k == 'acc_and_f1':
-                                key = 'acc_and_f1'
-                            elif k == 'pearson':
-                                key = 'pearson'
-                            elif k == 'spearmanr':
-                                key = 'spearmanr'
-                            else:
-                                raise gd.UnknownAccuracyMetric(f"The current training loop only"
-                                                               f" supports acc, mcc, corr, acc_and_f1, f1, pearson,"
-                                                               f" and spearmanr"
-                                                               f". Found {k}")
-
-
-
-
-                        if previous_accuracy < results[key]:          # acc, mcc, corr.
-                            # Note that previous accuracy could be acc, mrr, corr
-                            previous_accuracy = results[key]
-                            if args.call_wandb:
-                                wandb.log({'best_acc': previous_accuracy})
-                            # save the model here
-                            if args.save:
-                                gd.save_model(model=model, output_dir=args.output_dir,
-                                              model_name=args.task_name + args.output_name, accuracy=results[key],
-                                              config={"mode": args.mode})
-
-                        # for key, value in results.items():
-                        #     tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
-                    if args.call_wandb:
-                        wandb.log({'lr': scheduler.get_lr()[0]})
-                        wandb.log({'loss': tr_loss - logging_loss})
-
-                    # tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
-                    # tb_writer.add_scalar('loss', (tr_loss - logging_loss) / args.logging_steps, global_step)
-                    logging.info(f"the current training loss is {tr_loss - logging_loss}")
-                    logging_loss = tr_loss
-
-            if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
-                break
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
@@ -225,6 +225,126 @@ def train(args: Union[dict, gd.FancyDict], train_dataset, model, tokenizer):
         wandb.config['global_loss'] = tr_loss / global_step
     return global_step, tr_loss / global_step
 
+def forward_pass(args, model, batch, tr_loss, global_step, step, scheduler, optimizer, previous_accuracy, logging_loss
+                 , tokenizer, custom_alpha, do_evaluate=True):
+    model.train()
+    batch = tuple(t.to(args.device) for t in batch)
+    if args.mode == 'loss_in_train_loop':
+        inputs = {'input_ids': batch[0],
+                  'attention_mask': batch[1],
+                  'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None}
+
+        outputs = model(**inputs)
+        logits = outputs[0]
+        inputs['labels'] = batch[3]
+
+        # outputs = (logits,) + outputs[2:]  # add hidden hiddenstates and attention if they are here
+
+        # Calculating loss
+        if inputs['labels'] is not None:
+            if args.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), inputs['labels'].view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, args.num_labels), inputs['labels'].view(-1))
+            outputs = (loss,) + outputs
+
+        loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
+
+    elif args.mode == 'loss_in_model':
+        inputs = {'input_ids': batch[0],
+                  'attention_mask': batch[1],
+                  'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
+                  'targets': batch[3],
+                  'custom_alpha':custom_alpha }
+
+        loss, logits = model(**inputs)
+        inputs['labels'] = batch[3]
+
+    else:
+        print(f"mode not recognized. mode found {args.mode}")
+        raise IOError
+
+    if args.n_gpu > 1:
+        loss = loss.mean()  # mean() to average on multi-gpu parallel training
+    if args.gradient_accumulation_steps > 1:
+        loss = loss / args.gradient_accumulation_steps
+
+
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+
+    iter_loss = loss.item()
+    tr_loss += iter_loss
+
+    # logging loss for wandb
+    if global_step % args.logging_loss_steps == 0 and args.call_wandb:
+        # log the loss here
+        wandb.log({'iter_loss': iter_loss})
+
+    if (step + 1) % args.gradient_accumulation_steps == 0:
+        scheduler.step()  # Update learning rate schedule
+        optimizer.step()
+        if args.pruner:
+            args.pruner.step()
+        model.zero_grad()
+        global_step += 1
+
+        if args.local_rank in [-1, 0] and args.logging_steps > 0 and\
+                global_step % args.logging_steps == 0 and do_evaluate:
+            # Log metrics
+            if args.local_rank == -1 and args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
+                results = evaluate(args, model, tokenizer)
+
+                if args.call_wandb:
+                    wandb.log({k: v for k, v in results.items()})
+
+                for k, v in results.items():
+                    if k == 'acc':
+                        key = 'acc'
+                    elif k == 'mcc':
+                        key = 'mcc'
+                    elif k == 'corr':
+                        key = 'corr'
+                    elif k == 'f1':
+                        key = 'f1'
+                    elif k == 'acc_and_f1':
+                        key = 'acc_and_f1'
+                    elif k == 'pearson':
+                        key = 'pearson'
+                    elif k == 'spearmanr':
+                        key = 'spearmanr'
+                    else:
+                        raise gd.UnknownAccuracyMetric(f"The current training loop only"
+                                                       f" supports acc, mcc, corr, acc_and_f1, f1, pearson,"
+                                                       f" and spearmanr"
+                                                       f". Found {k}")
+
+                if previous_accuracy < results[key]:  # acc, mcc, corr.
+                    # Note that previous accuracy could be acc, mrr, corr
+                    previous_accuracy = results[key]
+                    if args.call_wandb:
+                        wandb.log({'best_acc': previous_accuracy})
+                    # save the model here
+                    if args.save:
+                        gd.save_model(model=model, output_dir=args.output_dir,
+                                      model_name=args.task_name + args.output_name, accuracy=results[key],
+                                      config={"mode": args.mode})
+
+                # for key, value in results.items():
+                #     tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
+            if args.call_wandb:
+                wandb.log({'lr': scheduler.get_lr()[0]})
+                wandb.log({'loss': tr_loss - logging_loss})
+
+            # tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
+            # tb_writer.add_scalar('loss', (tr_loss - logging_loss) / args.logging_steps, global_step)
+            logging.info(f"the current training loss is {tr_loss - logging_loss}")
+            logging_loss = tr_loss
+
+    return logging_loss, global_step, tr_loss
 
 def evaluate(args, model, tokenizer, prefix=""):
     # Loop to handle MNLI double evaluation (matched, mis-matched)
@@ -322,7 +442,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     return results
 
 
-def load_and_cache_examples(args, task, tokenizer, evaluate=False):
+def load_and_cache_examples(args, task, tokenizer, evaluate=False, trim=1.0):
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
 
@@ -367,7 +487,13 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False):
     elif output_mode == "regression":
         all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.float)
 
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    if trim < 1:
+        index = np.random.choice(np.arange(len(all_input_ids)), size=int(len(all_input_ids)*trim))
+        dataset = TensorDataset(
+            all_input_ids[index], all_input_mask[index], all_segment_ids[index], all_label_ids[index]
+        )
+    else:
+        dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
     return dataset
 
 
@@ -400,9 +526,23 @@ def main(args, model, tokenizer):
 
     if args.do_train:
         logger.info(f"dataset chossen is {args.task_name}")
+
         train_dataset = load_and_cache_examples(args, args.task_name, tokenizer, evaluate=False)
+
+        dd = args.data_dir
+        d = args.task_name
+
+        args.task_name = 'qqp'
+        args.data_dir = 'dataset/QQP'
+        train_dataset_aux = load_and_cache_examples(args, 'qqp', tokenizer, evaluate=False, trim=0.03)
+
+        args.data_dir = dd
+        args.task_name = d
+
+
         logger.info("About to begin training")
-        global_step, tr_loss = train(args=args, train_dataset=train_dataset, model=model, tokenizer=tokenizer)
+        global_step, tr_loss = train(args=args, train_dataset=train_dataset, train_dataset_aux = train_dataset_aux,
+                                     model=model, tokenizer=tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
 
@@ -411,14 +551,14 @@ if __name__ == '__main__':
     '''
         save - if True:
                     saves the model
-        
+
         mode 
             - loss_in_train_loop
             - loss_in_model
-        
+
         # in BERTClassifier the loss is calculated in the train loop
         # in BertDistillWithAttentionModel and BertDistill loss is calculated in the model and not training loop.
-    
+
     '''
 
     args = gd.FancyDict(
@@ -455,14 +595,14 @@ if __name__ == '__main__':
         weight_decay=0.0,
         adam_epsilon=1e-8,
         max_grad_norm=1.0,
-        num_train_epochs=3.0,
+        num_train_epochs=6.0,
         max_steps=-1,
         warmup_steps=0,
         logging_steps=1000,
         logging_loss_steps=10,
         save_steps=1000,
         eval_all_checkpoints=True,
-        no_cuda=False,
+        no_cuda=True,
         overwrite_output_dir=True,
         overwrite_cache=True,
         seed=42,
@@ -478,16 +618,16 @@ if __name__ == '__main__':
         prune_frac_emb=0.5)
 
     # Diff in args
-    args.call_wandb = True
+    args.call_wandb = False
     args.mode = 'loss_in_model'
 
     args.method = 'cut'
-    args.loss_type = 'distill' #attention
+    args.loss_type = 'attention'  # attention
     args.only_teacher = False
     args.save = False
     args.alpha = 0.5
-    args.data_dir = 'dataset/SSTB'
-    args.task_name = 'SSTB'
+    args.data_dir = 'dataset/MRPC'
+    args.task_name = 'MRPC'
 
     # various experiment varioation
 
@@ -500,10 +640,10 @@ if __name__ == '__main__':
         args.data_dir = 'dataset/' + args.task_name
 
     # dataset size
-    dataset_logging =  {
+    dataset_logging = {
         'CoLA': 100,
         'SST-2': 1000,
-        'MRPC': 100,
+        'MRPC': 30,
         'STS-B': 100,
         'QQP': 1000,
         'MNLI': 1000,
@@ -540,11 +680,13 @@ if __name__ == '__main__':
 
         # Lilbert with attention distillation - 2a
         _, tok = lilbert.get_bert()
-        teacher = torch.load(args.output_dir + args.task_name.lower() + args.output_name)
+        device = torch.device('cpu')
+        teacher = torch.load(args.output_dir + args.task_name.lower() + args.output_name, map_location=device)
 
         # Make Lilbert.
         if args.method == 'prune':  # 2
-            student, pruner = lilbert.make_lil_bert(teacher, fraction=args.prune_frac, fraction_emb=args.prune_frac_emb, method="prune",
+            student, pruner = lilbert.make_lil_bert(teacher, fraction=args.prune_frac, fraction_emb=args.prune_frac_emb,
+                                                    method="prune",
                                                     vanilla=args.from_scratch), None
         elif args.method == 'cut':  # 3
             student, pruner = lilbert.make_lil_bert(teacher, dim=args.student_dim, method="cut",

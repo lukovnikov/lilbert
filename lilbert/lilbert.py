@@ -153,13 +153,17 @@ class BertDistillLoss(torch.nn.Module):
             self.loss = torch.nn.MSELoss(reduction=reduction)
             print("WARNING: if regression, output distillation is not done.")
 
-    def forward(self, logits, targets, targetlogits=None):
+    def forward(self, logits, targets, targetlogits=None, custom_aplha=None):
         """
         :param logits:       (batsize, numclasses) unnormalized logits from classifier
         :param targets:      (batsize, ) int id of correct class
         :param targetlogits: (batsize, numclasses) unnormalized logits from parent classifier
         :return:
         """
+
+        if custom_aplha:
+            # print(f"found custom alpha with value {custom_aplha}")
+            self.alpha = custom_aplha
         if self.regression:
             loss = self.loss(logits.view(-1), targets.view(-1))
             ret = loss
@@ -314,10 +318,10 @@ class BertClassifierModel(torch.nn.Module):
         self.loss = BertDistillLoss(alpha=1., regression=self.m.numclasses == 1)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None,
-                position_ids=None, head_mask=None, targets=None):
+                position_ids=None, head_mask=None, targets=None, custom_alpha=None):
         logits, _ = self.m(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask,
                            position_ids=position_ids, head_mask=head_mask)
-        l = self.loss(logits, targets)
+        l = self.loss(logits, targets,None, custom_alpha)
         return l, logits
 
 
@@ -334,10 +338,11 @@ class BertDistillModel(torch.nn.Module):
         """
         super(BertDistillModel, self).__init__(**kw)
         self.teacher, self.student = teacher, student
-        self.loss = BertDistillLoss(alpha=alpha, regression=self.teacher.numclasses == 1, mode=mode, temperature=temperature)
+        self.loss = BertDistillLoss(alpha=alpha, regression=self.teacher.numclasses == 1,
+                                    mode=mode, temperature=temperature)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, position_ids=None, head_mask=None,
-                targets=None):
+                targets=None, custom_alpha=None):
         """
         Same as BertModel
         :param targets: (batsize,) classification target int ids
@@ -353,11 +358,15 @@ class BertDistillModel(torch.nn.Module):
         student_logits, student_attention_logits = self.student(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, position_ids=position_ids)
         student_attention_logits = torch.stack(student_attention_logits, 1)
         # compute loss
-        loss = self.get_loss(targets, student_logits, teacher_logits, student_attention_logits, teacher_attention_logits, attention_mask)
+        loss = self.get_loss(g=targets, pred= student_logits, teacher_pred=teacher_logits,
+                             sa_logits = student_attention_logits,
+                             ta_logits= teacher_attention_logits,
+                             att_mask= attention_mask,
+                             custom_alpha= custom_alpha)
         return loss, student_logits
 
-    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask):
-        return self.loss(pred, g, teacher_pred)
+    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask, custom_alpha='default'):
+        return self.loss(pred, g, teacher_pred, custom_alpha)
 
 
 class BertDistillWithAttentionModel(BertDistillModel):
@@ -367,8 +376,9 @@ class BertDistillWithAttentionModel(BertDistillModel):
         self.beta = beta
         self.att_loss = AttentionDistillLoss(mode=mode, temperature=attention_temperature)
 
-    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask):
-        mainl = super(BertDistillWithAttentionModel, self).get_loss(g, pred, teacher_pred, sa_logits, ta_logits, att_mask)
+    def get_loss(self, g, pred, teacher_pred, sa_logits, ta_logits, att_mask, custom_alpha):
+        mainl = super(BertDistillWithAttentionModel, self).get_loss(g, pred, teacher_pred, sa_logits,
+                                                                    ta_logits, att_mask, custom_alpha)
         attl = self.att_loss(sa_logits, ta_logits, att_mask)
         ret = mainl + self.beta * attl
         return ret
@@ -568,7 +578,6 @@ class LinearPruner(object):
             make_lil_bert_prune(self.bert, fraction, fraction_emb, deepcopy=False)
         self.counter += 1
 
-
 def try_linear_pruner():
     import qelos as q
     tt = q.ticktock("try_linear_pruner")
@@ -597,8 +606,6 @@ def try_linear_pruner():
             assert(pruner.bert == lilbertc)
             print("Number of zeros in a self-attention layer:", (lilbertc.bert.encoder.layer[5].attention.self.query.weight == 0).sum())
 
-
-
 def make_lil_bert_prune(bert: Union[pt.BertModel, BertClassifier], fraction=0.3, fraction_emb=0.5, deepcopy=True):
     if deepcopy:
         _ret_bert = copy.deepcopy(bert)
@@ -614,7 +621,6 @@ def make_lil_bert_prune(bert: Union[pt.BertModel, BertClassifier], fraction=0.3,
     prune_linear_f = partial(prune_linear_submodules, fraction)
     _bert.apply(prune_linear_f)
     return _ret_bert
-
 
 def try_prune_lil_bert():
     teacher, tok = get_bert()
@@ -851,7 +857,7 @@ def try_bert_distill_model():
 
     x = "lil bert went for a walk"
     xtok = torch.tensor(tok.encode(x)).unsqueeze(0)
-    y = m(xtok, targets=torch.randint(0, 4, (1,)))
+    y = m(xtok, targets=torch.randint(0, 4, (1,)), custom_alpha = 0.8)
 
     l = y[0]
     l.backward()
