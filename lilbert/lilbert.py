@@ -832,9 +832,19 @@ def try_masked_cut_vs_actual_cut():
     l_mask = mask_y[0].sum()
     l_mask.backward()
 
-    print(mask_student.embeddings.word_embeddings.weight.grad[1012])
-    print(mask_student.embeddings.word_embeddings.weight.grad[1012])
-    print(mask_student.embeddings.word_embeddings.weight.grad[1012])
+    # print(cut_student.embeddings.word_embeddings.weight.grad[1012])
+    # print(mask_student.embeddings.word_embeddings.weight.grad[1012])
+    print(mask_student.embeddings)
+    assert(torch.allclose(mask_student.embeddings.word_embeddings.weight.grad[1012][:252],
+                          cut_student.embeddings.word_embeddings.weight.grad[1012], atol=1e-5))
+    assert (torch.allclose(mask_student.embeddings.word_embeddings.weight.grad[1012][252:],
+                           torch.zeros_like(mask_student.embeddings.word_embeddings.weight.grad[1012][252:])))
+
+
+    assert(torch.allclose(mask_student.embeddings.position_embeddings.weight.grad[:, :252],
+                          cut_student.embeddings.position_embeddings.weight.grad, atol=1e-5))
+    assert (torch.allclose(mask_student.embeddings.position_embeddings.weight.grad[:, 252:],
+                           torch.zeros_like(mask_student.embeddings.position_embeddings.weight.grad[:, 252:])))
 
 
 
