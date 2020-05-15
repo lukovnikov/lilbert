@@ -4,6 +4,7 @@ import sys
 from functools import partial
 from typing import Union
 
+sys.path.append('../transformer')
 import pytorch_transformers as pt       # needs lukovnikov/master fork
 import torch
 import numpy as np

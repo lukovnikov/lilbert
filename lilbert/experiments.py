@@ -1,3 +1,6 @@
+import sys
+sys.path.append('../transformer')
+
 import torch
 import pytorch_transformers as pt
 
